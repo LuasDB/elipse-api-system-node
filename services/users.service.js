@@ -1,5 +1,5 @@
 import { ObjectId } from 'mongodb'
-import { db } from './../db/mongoClient.js'
+import { db } from '../db/mongoClient.js'
 import  Boom  from "@hapi/boom"
 
 class Users{

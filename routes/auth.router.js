@@ -20,10 +20,13 @@ router.post('/register',async(req, res, next)=>{
 
 router.post('/login',async(req, res, next)=>{
   try {
+    console.log('Tocando a login')
     const token = await auth.login(req.body)
     if(token){
       res.status(200).json({
-        success:true,message:'Acceso',token
+        success:true,
+        message:'Acceso',
+        data:token
       })
     }
   } catch (error) {

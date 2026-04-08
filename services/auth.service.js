@@ -8,7 +8,7 @@ import path from 'path'
 
 class Auth{
   constructor(){
-    this.jwtSecret = this.jwtSecret,
+    this.jwtSecret = config.jwtSecret,
     this.jwtExpiration='1h'
   }
 
@@ -74,12 +74,15 @@ class Auth{
     try {
       const { password,email } = data
       const user = await db.collection('users').findOne({email})
+      
+      if(user) console.log('Existe:',user)
 
       if(!user){
         throw Boom.unauthorized('Email o passwor incorrectos')
       }
 
       const isPasswordValid = await bcrypt.compare(password,user.password)
+
 
       if(!isPasswordValid){
         throw Boom.unauthorized('Email o passwor incorrectos')
@@ -89,8 +92,8 @@ class Auth{
       const payload = user
 
       const token = jwt.sign(payload,this.jwtSecret,{ expiresIn:'5h'})
-
-      return token
+      console.log(token)
+      return {token,user}
 
     } catch (error) {
       if(Boom.isBoom(error)){
