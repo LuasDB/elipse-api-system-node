@@ -337,6 +337,62 @@ class Payments {
       throw Boom.badImplementation('Error al eliminar pagos del contrato', error)
     }
   }
+
+  async addVouchers(id, files) {
+  try {
+    if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
+
+    const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+    if (!payment) throw Boom.notFound('Pago no encontrado')
+
+    const vouchers = files.map(file => ({
+      originalName: file.originalname,
+      fileName: file.filename,
+      path: file.path,
+      size: file.size,
+      mimetype: file.mimetype,
+      uploadedAt: new Date()
+    }))
+
+    await db.collection(this.collection).updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $push: { vouchers: { $each: vouchers } },
+        $set: { updatedAt: new Date() }
+      }
+    )
+
+    return { added: vouchers.length, vouchers }
+  } catch (error) {
+    if (Boom.isBoom(error)) throw error
+    throw Boom.badImplementation('Error al agregar comprobantes', error)
+  }
+}
+
+async removeVoucher(id, fileName) {
+  try {
+    if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
+
+    await db.collection(this.collection).updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $pull: { vouchers: { fileName } },
+        $set: { updatedAt: new Date() }
+      }
+    )
+
+    const filePath = `uploads/payments/${id}/${fileName}`
+    const fs = await import('fs')
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath)
+    }
+
+    return { removed: fileName }
+  } catch (error) {
+    if (Boom.isBoom(error)) throw error
+    throw Boom.badImplementation('Error al eliminar comprobante', error)
+  }
+}
 }
 
 export default Payments

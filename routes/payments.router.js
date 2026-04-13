@@ -68,6 +68,51 @@ const paymentsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
+  // Subir comprobantes de pago
+router.post('/:id/vouchers', authenticate, authorize('admin', 'gerente', 'cobranza'), async (req, res, next) => {
+  try {
+    const { id } = req.params
+    const { default: uploadPaymentFiles } = await import('./../configurations/multer-payments.js')
+    const upload = uploadPaymentFiles(id)
+
+    upload.array('vouchers', 5)(req, res, async (err) => {
+      if (err) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return next(Boom.badRequest('El archivo excede el límite de 10MB'))
+        }
+        return next(Boom.badRequest(err.message))
+      }
+
+      if (!req.files || req.files.length === 0) {
+        return next(Boom.badRequest('No se recibieron archivos'))
+      }
+
+      try {
+        const result = await payments.addVouchers(id, req.files)
+        io.emit('payment_voucher_added', { message: 'Comprobante agregado' })
+        res.status(200).json({
+          success: true,
+          message: `${req.files.length} comprobante(s) subido(s)`,
+          data: result
+        })
+      } catch (error) {
+        next(error)
+      }
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// Eliminar un comprobante
+router.delete('/:id/vouchers/:fileName', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+  try {
+    const { id, fileName } = req.params
+    const result = await payments.removeVoucher(id, fileName)
+    res.status(200).json({ success: true, message: 'Comprobante eliminado', data: result })
+  } catch (error) { next(error) }
+})
+
   return router
 }
 
