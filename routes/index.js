@@ -6,6 +6,8 @@ import projectsRouter from './projects.router.js'
 import unitsRouter from './units.router.js'
 import buyersRouter from './buyers.router.js'
 import contractsRouter from './contracts.router.js'
+import paymentsRouter from './payments.router.js'
+
 const router = express.Router()
 
 const AppRouter = (app,io) => {
@@ -18,6 +20,7 @@ const AppRouter = (app,io) => {
   router.use('/units', unitsRouter(io))
   router.use('/buyers', buyersRouter(io))
   router.use('/contracts', contractsRouter(io))
+  router.use('/payments', paymentsRouter(io))
 
 }
 
