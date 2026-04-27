@@ -26,15 +26,19 @@ class Units {
         ...data,
         totalArea: Number(data.totalArea) || 0,
         builtArea: Number(data.builtArea) || 0,
+        coveredArea: Number(data.coveredArea) || 0,
+        openArea: Number(data.openArea) || 0,
         bedrooms: Number(data.bedrooms) || 0,
         bathrooms: Number(data.bathrooms) || 0,
         halfBathrooms: Number(data.halfBathrooms) || 0,
         parkingSpaces: Number(data.parkingSpaces) || 0,
         listPrice: Number(data.listPrice) || 0,
         finalPrice: Number(data.finalPrice) || 0,
+        currency: 'USD',
         floor: Number(data.floor) || 0,
         terraceArea: Number(data.terraceArea) || 0,
         gardenArea: Number(data.gardenArea) || 0,
+        storageArea: Number(data.storageArea) || 0,
         hasStorage: data.hasStorage || false,
         hasTerrace: data.hasTerrace || false,
         hasGarden: data.hasGarden || false,
@@ -98,10 +102,7 @@ class Units {
       dataToUpdate.updatedAt = new Date()
 
       // Convertir numéricos
-      const numericFields = ['totalArea', 'builtArea', 'bedrooms', 'bathrooms', 'halfBathrooms', 'parkingSpaces', 'listPrice', 'finalPrice', 'floor', 'terraceArea', 'gardenArea']
-      numericFields.forEach(field => {
-        if (dataToUpdate[field] !== undefined) dataToUpdate[field] = Number(dataToUpdate[field]) || 0
-      })
+      const numericFields = ['totalArea', 'builtArea', 'coveredArea', 'openArea', 'bedrooms', 'bathrooms', 'halfBathrooms', 'parkingSpaces', 'listPrice', 'finalPrice', 'floor', 'terraceArea', 'gardenArea', 'storageArea']
 
       const result = await db.collection(this.collection).updateOne(
         { _id: new ObjectId(id) },

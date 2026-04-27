@@ -37,6 +37,8 @@ class Payments {
           expectedAmount: contract.downPayment,
           paidAmount: 0,
           balance: contract.downPayment,
+          currency: 'USD',
+          contractExchangeRate: contract.exchangeRate || null,
           dueDate: contract.promiseDate ? new Date(contract.promiseDate) : now,
           paidDate: null,
           status: 'pendiente',
@@ -73,6 +75,8 @@ class Payments {
             expectedAmount: monthlyAmount,
             paidAmount: 0,
             balance: monthlyAmount,
+            currency: 'USD',
+            contractExchangeRate: contract.exchangeRate || null,
             dueDate,
             paidDate: null,
             status: 'pendiente',
@@ -145,6 +149,12 @@ class Payments {
       const amount = Number(paymentData.amount)
       if (!amount || amount <= 0) throw Boom.badData('El monto debe ser mayor a 0')
 
+      // Validar TC del día del pago
+      const exchangeRate = Number(paymentData.exchangeRate)
+      if (!exchangeRate || exchangeRate <= 0) {
+        throw Boom.badData('El tipo de cambio (USD a MXN) del día es requerido')
+      }
+
       const newPaidAmount = payment.paidAmount + amount
       const newBalance = payment.expectedAmount - newPaidAmount
       const now = new Date()
@@ -162,12 +172,19 @@ class Payments {
         paymentMethod: paymentData.paymentMethod || payment.paymentMethod,
         reference: paymentData.reference || payment.reference,
         notes: paymentData.notes || payment.notes,
+        // Último TC usado en este pago
+        lastExchangeRate: exchangeRate,
+        lastExchangeRateDate: paymentData.exchangeRateDate ? new Date(paymentData.exchangeRateDate) : now,
         updatedAt: now
       }
 
-      // Guardar en historial de movimientos
+      // Guardar en historial de movimientos (cada movimiento tiene su propio TC)
       const movement = {
         amount,
+        currency: 'USD',
+        exchangeRate,
+        exchangeRateDate: paymentData.exchangeRateDate ? new Date(paymentData.exchangeRateDate) : now,
+        mxnEquivalent: Math.round(amount * exchangeRate * 100) / 100,
         paymentMethod: paymentData.paymentMethod || null,
         reference: paymentData.reference || null,
         notes: paymentData.notes || null,
@@ -308,6 +325,82 @@ class Payments {
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al obtener alertas', error)
+    }
+  }
+
+  // Cobranza por periodo (totales agregados USD + MXN basados en movements)
+  async getCollectionsByPeriod(startDate, endDate) {
+    try {
+      if (!startDate || !endDate) {
+        throw Boom.badData('Las fechas de inicio y fin son requeridas')
+      }
+
+      const start = new Date(startDate)
+      const end = new Date(endDate)
+
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        throw Boom.badData('Las fechas no son válidas')
+      }
+
+      if (start > end) {
+        throw Boom.badData('La fecha de inicio no puede ser posterior a la fecha de fin')
+      }
+
+      // Aggregation: desplegamos todos los movements y filtramos por rango de fecha
+      const result = await db.collection(this.collection).aggregate([
+        { $match: { movements: { $exists: true, $ne: [] } } },
+        { $unwind: '$movements' },
+        {
+          $match: {
+            'movements.registeredAt': { $gte: start, $lte: end }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalUSD: { $sum: '$movements.amount' },
+            totalMXN: { $sum: { $ifNull: ['$movements.mxnEquivalent', 0] } },
+            movementsCount: { $sum: 1 },
+            uniquePayments: { $addToSet: '$_id' },
+            uniqueContracts: { $addToSet: '$contractId' }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            totalUSD: { $round: ['$totalUSD', 2] },
+            totalMXN: { $round: ['$totalMXN', 2] },
+            movementsCount: 1,
+            paymentsCount: { $size: '$uniquePayments' },
+            contractsCount: { $size: '$uniqueContracts' }
+          }
+        }
+      ]).toArray()
+
+      const summary = result[0] || {
+        totalUSD: 0,
+        totalMXN: 0,
+        movementsCount: 0,
+        paymentsCount: 0,
+        contractsCount: 0
+      }
+
+      // TC promedio ponderado del periodo (útil para mostrar referencia)
+      const averageRate = summary.totalUSD > 0
+        ? Math.round((summary.totalMXN / summary.totalUSD) * 10000) / 10000
+        : 0
+
+      return {
+        period: {
+          startDate: start,
+          endDate: end
+        },
+        ...summary,
+        averageExchangeRate: averageRate
+      }
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al obtener cobranza del periodo', error)
     }
   }
 

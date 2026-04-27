@@ -36,13 +36,24 @@ class Contracts {
       const buyer = await db.collection('buyers').findOne({ _id: new ObjectId(buyerId) })
       if (!buyer) throw Boom.notFound('El comprador no existe')
 
+      // Validar tipo de cambio
+      const exchangeRate = Number(data.exchangeRate)
+      if (!exchangeRate || exchangeRate <= 0) {
+        throw Boom.badData('El tipo de cambio (USD a MXN) es requerido y debe ser mayor a 0')
+      }
+
       const contract = {
         ...data,
         contractNumber: data.contractNumber || await this.generateContractNumber(projectId),
+        // Montos en USD (moneda fuente)
         salePrice: Number(data.salePrice) || 0,
         downPayment: Number(data.downPayment) || 0,
         monthlyPayment: Number(data.monthlyPayment) || 0,
         totalPayments: Number(data.totalPayments) || 0,
+        currency: 'USD',
+        // Tipo de cambio del contrato
+        exchangeRate,
+        exchangeRateDate: data.exchangeRateDate ? new Date(data.exchangeRateDate) : new Date(),
         status: data.status || 'promesa',
         // Snapshots para referencia rápida
         buyerName: buyer.name,
@@ -159,10 +170,20 @@ class Contracts {
       dataToUpdate.updatedAt = new Date()
 
       // Convertir numéricos
-      const numericFields = ['salePrice', 'downPayment', 'monthlyPayment', 'totalPayments']
+      const numericFields = ['salePrice', 'downPayment', 'monthlyPayment', 'totalPayments', 'exchangeRate']
       numericFields.forEach(field => {
         if (dataToUpdate[field] !== undefined) dataToUpdate[field] = Number(dataToUpdate[field]) || 0
       })
+
+      // Validar TC si se está actualizando
+      if (dataToUpdate.exchangeRate !== undefined && dataToUpdate.exchangeRate <= 0) {
+        throw Boom.badData('El tipo de cambio debe ser mayor a 0')
+      }
+
+      // Convertir fecha del TC si se actualiza
+      if (dataToUpdate.exchangeRateDate) {
+        dataToUpdate.exchangeRateDate = new Date(dataToUpdate.exchangeRateDate)
+      }
 
       const result = await db.collection(this.collection).updateOne(
         { _id: new ObjectId(id) },

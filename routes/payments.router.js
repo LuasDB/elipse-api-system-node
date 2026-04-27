@@ -15,6 +15,15 @@ const paymentsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
+  // Cobranza por periodo (dashboard)
+  router.get('/collections-by-period', authenticate, async (req, res, next) => {
+    try {
+      const { startDate, endDate } = req.query
+      const result = await payments.getCollectionsByPeriod(startDate, endDate)
+      res.status(200).json({ success: true, message: 'Cobranza obtenida', data: result })
+    } catch (error) { next(error) }
+  })
+
   // Resumen financiero de un contrato
   router.get('/summary/:contractId', authenticate, async (req, res, next) => {
     try {
