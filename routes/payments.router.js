@@ -61,6 +61,27 @@ const paymentsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
+  // [LÍNEA 2] Marcar hito como completado
+  router.patch('/:id/milestone/complete', authenticate, async (req, res, next) => {
+    try {
+      const result = await payments.completeMilestone(req.params.id, {
+        ...req.body,
+        completedBy: req.user?.id || req.user?._id || null
+      })
+      io.emit('milestone_completed', { paymentId: req.params.id, ...result })
+      res.status(200).json({ success: true, message: 'Hito marcado como completado', data: result })
+    } catch (error) { next(error) }
+  })
+
+  // [LÍNEA 2] Revertir hito (sólo si no tiene pagos)
+  router.patch('/:id/milestone/uncomplete', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+    try {
+      const result = await payments.uncompleteMilestone(req.params.id)
+      io.emit('milestone_uncompleted', { paymentId: req.params.id, ...result })
+      res.status(200).json({ success: true, message: 'Hito revertido a pendiente', data: result })
+    } catch (error) { next(error) }
+  })
+
   // Eliminar un pago
   router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {
     try {
