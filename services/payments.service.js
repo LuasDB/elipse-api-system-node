@@ -49,6 +49,7 @@ class Payments {
           // Campos de hito (no aplica al enganche)
           isMilestone: false,
           milestoneStatus: null,
+          movements: [],
           createdAt: now,
           updatedAt: now
         })
@@ -88,6 +89,7 @@ class Payments {
               notes: null,
               isMilestone: false,
               milestoneStatus: null,
+              movements: [],
               createdAt: now,
               updatedAt: now
             })
@@ -114,7 +116,7 @@ class Payments {
             balance: m.amount,
             currency: 'USD',
             contractExchangeRate: contract.exchangeRate || null,
-            dueDate: m.estimatedDate || now,
+            dueDate: null,                  // Los hitos no tienen vencimiento
             paidDate: null,
             status: 'pendiente',
             paymentMethod: null,
@@ -124,11 +126,12 @@ class Payments {
             isMilestone: true,
             milestoneName: m.name,
             milestoneOrder: m.order,
-            milestoneStatus: 'pendiente', // 'pendiente' | 'completado'
+            milestoneStatus: 'pendiente',   // 'pendiente' | 'completado'
             milestoneCompletedAt: null,
             milestoneCompletedBy: null,
             milestoneNotes: null,
-            estimatedDate: m.estimatedDate,
+            commitmentDate: null,           // Se llena al completar el hito
+            movements: [],
             createdAt: now,
             updatedAt: now
           })
@@ -192,10 +195,7 @@ class Payments {
       if (!payment) throw Boom.notFound('Pago no encontrado')
       if (payment.status === 'pagado') throw Boom.conflict('Este pago ya fue registrado como pagado')
 
-      // Bloqueo Línea 2: no permitir cobrar hitos no completados
-      if (payment.isMilestone && payment.milestoneStatus !== 'completado') {
-        throw Boom.forbidden(`No se puede cobrar el hito "${payment.milestoneName}" hasta que sea marcado como completado`)
-      }
+     
 
       const amount = Number(paymentData.amount)
       if (!amount || amount <= 0) throw Boom.badData('El monto debe ser mayor a 0')
@@ -312,7 +312,7 @@ class Payments {
       const next30 = new Date()
       next30.setDate(next30.getDate() + 30)
 
-      const [overdue, dueThisMonth, collected, upcoming, milestonesCompletedUnpaid, milestonesOverdue] = await Promise.all([
+      const [overdue, dueThisMonth, collected, upcoming] = await Promise.all([
         // Pagos vencidos
         db.collection(this.collection).aggregate([
           { $match: { status: { $in: ['pendiente', 'parcial'] }, dueDate: { $lt: now } } },
@@ -345,13 +345,48 @@ class Payments {
         ]).toArray(),
       ])
 
+      // Hitos pagados pendientes de marcar como completados
+      const milestonesPendingCompletion = await db.collection('payments').aggregate([
+        {
+          $match: {
+            isMilestone: true,
+            milestoneStatus: 'pendiente',
+            paidAmount: { $gt: 0 }
+          }
+        },
+        {
+          $lookup: {
+            from: 'contracts',
+            localField: 'contractId',
+            foreignField: '_id',
+            as: 'contract'
+          }
+        },
+        { $unwind: '$contract' },
+        {
+          $project: {
+            _id: 1,
+            concept: 1,
+            milestoneName: 1,
+            paidAmount: 1,
+            expectedAmount: 1,
+            buyerName: '$contract.buyerName',
+            unitIdentifier: '$contract.unitIdentifier',
+            contractNumber: '$contract.contractNumber'
+          }
+        }
+      ]).toArray()
+
       return {
         overdue: { total: overdue[0]?.total || 0, count: overdue[0]?.count || 0 },
         dueThisMonth: { total: dueThisMonth[0]?.total || 0, count: dueThisMonth[0]?.count || 0 },
         collected: { total: collected[0]?.total || 0, count: collected[0]?.count || 0 },
         upcoming: { count: upcoming[0]?.count || 0 },
-        milestonesCompletedUnpaid: { total: milestonesCompletedUnpaid[0]?.total || 0, count: milestonesCompletedUnpaid[0]?.count || 0 },
-        milestonesOverdue: { count: milestonesOverdue[0]?.count || 0 }
+        milestonesPendingCompletion: {
+          count: milestonesPendingCompletion.length,
+          total: milestonesPendingCompletion.reduce((s, m) => s + (m.paidAmount || 0), 0),
+          items: milestonesPendingCompletion
+        }
       }
     } catch (error) {
       throw Boom.badImplementation('Error al obtener alertas', error)
@@ -518,65 +553,99 @@ async removeVoucher(id, fileName) {
 }
 
 // Marcar hito como completado (Línea 2)
-  async completeMilestone(id, data = {}) {
+  async completeMilestone(paymentId, { commitmentDate, notes, completedBy } = {}) {
     try {
-      if (!ObjectId.isValid(id)) throw Boom.badRequest('ID no válido')
-
-      const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+      const payment = await this.getById(paymentId)
       if (!payment) throw Boom.notFound('Pago no encontrado')
       if (!payment.isMilestone) throw Boom.badRequest('Este pago no es un hito de obra')
-      if (payment.milestoneStatus === 'completado') throw Boom.conflict('Este hito ya está completado')
+      if (payment.milestoneStatus === 'completado') throw Boom.badRequest('El hito ya está marcado como completado')
 
-      const now = new Date()
-      const updateData = {
+      // Nueva validación: requiere al menos un pago registrado
+      if (!payment.paidAmount || payment.paidAmount <= 0) {
+        throw Boom.forbidden('No se puede completar el hito: aún no tiene pagos registrados')
+      }
+
+      if (!commitmentDate) {
+        throw Boom.badRequest('La fecha compromiso de entrega es requerida')
+      }
+
+      const update = {
         milestoneStatus: 'completado',
-        milestoneCompletedAt: data.completedAt ? new Date(data.completedAt) : now,
-        milestoneCompletedBy: data.completedBy || null,
-        milestoneNotes: data.notes || null,
-        updatedAt: now
-      }
-
-      await db.collection(this.collection).updateOne(
-        { _id: new ObjectId(id) },
-        { $set: updateData }
-      )
-
-      return updateData
-    } catch (error) {
-      if (Boom.isBoom(error)) throw error
-      throw Boom.badImplementation('Error al completar hito', error)
-    }
-  }
-
-  // Revertir hito (en caso de error de captura) - solo si no hay movimientos
-  async uncompleteMilestone(id) {
-    try {
-      if (!ObjectId.isValid(id)) throw Boom.badRequest('ID no válido')
-
-      const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
-      if (!payment) throw Boom.notFound('Pago no encontrado')
-      if (!payment.isMilestone) throw Boom.badRequest('Este pago no es un hito de obra')
-      if (payment.paidAmount > 0) {
-        throw Boom.conflict('No se puede revertir un hito que ya tiene pagos registrados')
-      }
-
-      const updateData = {
-        milestoneStatus: 'pendiente',
-        milestoneCompletedAt: null,
-        milestoneCompletedBy: null,
-        milestoneNotes: null,
+        milestoneCompletedAt: new Date(),
+        commitmentDate: new Date(commitmentDate),
+        milestoneNotes: notes || null,
+        milestoneCompletedBy: completedBy || null,
         updatedAt: new Date()
       }
 
       await db.collection(this.collection).updateOne(
-        { _id: new ObjectId(id) },
-        { $set: updateData }
+        { _id: new ObjectId(paymentId) },
+        { $set: update }
       )
 
-      return updateData
+      return this.getById(paymentId)
     } catch (error) {
       if (Boom.isBoom(error)) throw error
-      throw Boom.badImplementation('Error al revertir hito', error)
+      throw Boom.badImplementation('Error al completar el hito', error)
+    }
+  }
+
+  async updateMilestoneCommitment(paymentId, { commitmentDate, notes }) {
+    try {
+      const payment = await this.getById(paymentId)
+      if (!payment) throw Boom.notFound('Pago no encontrado')
+      if (!payment.isMilestone) throw Boom.badRequest('Este pago no es un hito de obra')
+      if (payment.milestoneStatus !== 'completado') {
+        throw Boom.badRequest('Solo se puede editar la fecha compromiso de hitos completados')
+      }
+      if (!commitmentDate) throw Boom.badRequest('La fecha compromiso es requerida')
+
+      await db.collection(this.collection).updateOne(
+        { _id: new ObjectId(paymentId) },
+        {
+          $set: {
+            commitmentDate: new Date(commitmentDate),
+            ...(notes !== undefined ? { milestoneNotes: notes } : {}),
+            updatedAt: new Date()
+          }
+        }
+      )
+      return this.getById(paymentId)
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al actualizar la fecha compromiso', error)
+    }
+  }
+
+  // Revertir hito (en caso de error de captura) - solo si no hay movimientos
+  async uncompleteMilestone(paymentId) {
+    try {
+      const payment = await this.getById(paymentId)
+      if (!payment) throw Boom.notFound('Pago no encontrado')
+      if (!payment.isMilestone) throw Boom.badRequest('Este pago no es un hito de obra')
+      if (payment.milestoneStatus !== 'completado') {
+        throw Boom.badRequest('El hito no está completado')
+      }
+
+      await db.collection(this.collection).updateOne(
+        { _id: new ObjectId(paymentId) },
+        {
+          $set: {
+            milestoneStatus: 'pendiente',
+            updatedAt: new Date()
+          },
+          $unset: {
+            milestoneCompletedAt: '',
+            commitmentDate: '',
+            milestoneCompletedBy: ''
+            // milestoneNotes se mantiene como histórico
+          }
+        }
+      )
+      return this.getById(paymentId)
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al revertir el hito', error)
     }
   }
 }

@@ -82,6 +82,18 @@ const paymentsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
+  router.patch('/:id/milestone/commitment',
+  authenticate,
+    async (req, res, next) => {
+      try {
+        const result = await paymentsService.updateMilestoneCommitment(req.params.id, req.body)
+        // Emitir evento
+        req.io?.emit('payment:milestone:commitment-updated', { paymentId: req.params.id })
+        res.json({ success: true, message: 'Fecha compromiso actualizada', data: result })
+      } catch (err) { next(err) }
+    }
+  )
+
   // Eliminar un pago
   router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {
     try {

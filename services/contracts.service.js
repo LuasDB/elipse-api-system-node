@@ -9,6 +9,7 @@ class Contracts {
 
   // Valida y normaliza milestones de Línea 2
   validateAndNormalizeMilestones(milestones) {
+    
     if (!Array.isArray(milestones) || milestones.length === 0) {
       throw Boom.badData('Debe definir al menos un hito de obra')
     }
@@ -24,7 +25,6 @@ class Contracts {
       return {
         name: m.name.trim(),
         amount,
-        estimatedDate: m.estimatedDate ? new Date(m.estimatedDate) : null,
         order: Number(m.order) || (idx + 1)
       }
     }).sort((a, b) => a.order - b.order)
