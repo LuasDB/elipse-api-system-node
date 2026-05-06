@@ -555,7 +555,9 @@ async removeVoucher(id, fileName) {
 // Marcar hito como completado (Línea 2)
   async completeMilestone(paymentId, { commitmentDate, notes, completedBy } = {}) {
     try {
-      const payment = await this.getById(paymentId)
+      if (!ObjectId.isValid(paymentId)) throw Boom.badRequest('ID de pago no válido')
+
+      const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
       if (!payment) throw Boom.notFound('Pago no encontrado')
       if (!payment.isMilestone) throw Boom.badRequest('Este pago no es un hito de obra')
       if (payment.milestoneStatus === 'completado') throw Boom.badRequest('El hito ya está marcado como completado')
@@ -583,7 +585,7 @@ async removeVoucher(id, fileName) {
         { $set: update }
       )
 
-      return this.getById(paymentId)
+      return await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al completar el hito', error)
@@ -592,7 +594,9 @@ async removeVoucher(id, fileName) {
 
   async updateMilestoneCommitment(paymentId, { commitmentDate, notes }) {
     try {
-      const payment = await this.getById(paymentId)
+      if (!ObjectId.isValid(paymentId)) throw Boom.badRequest('ID de pago no válido')
+
+      const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
       if (!payment) throw Boom.notFound('Pago no encontrado')
       if (!payment.isMilestone) throw Boom.badRequest('Este pago no es un hito de obra')
       if (payment.milestoneStatus !== 'completado') {
@@ -600,17 +604,18 @@ async removeVoucher(id, fileName) {
       }
       if (!commitmentDate) throw Boom.badRequest('La fecha compromiso es requerida')
 
+      const set = {
+        commitmentDate: new Date(commitmentDate),
+        updatedAt: new Date()
+      }
+      if (notes !== undefined) set.milestoneNotes = notes
+
       await db.collection(this.collection).updateOne(
         { _id: new ObjectId(paymentId) },
-        {
-          $set: {
-            commitmentDate: new Date(commitmentDate),
-            ...(notes !== undefined ? { milestoneNotes: notes } : {}),
-            updatedAt: new Date()
-          }
-        }
+        { $set: set }
       )
-      return this.getById(paymentId)
+
+      return await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al actualizar la fecha compromiso', error)
@@ -620,7 +625,9 @@ async removeVoucher(id, fileName) {
   // Revertir hito (en caso de error de captura) - solo si no hay movimientos
   async uncompleteMilestone(paymentId) {
     try {
-      const payment = await this.getById(paymentId)
+      if (!ObjectId.isValid(paymentId)) throw Boom.badRequest('ID de pago no válido')
+
+      const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
       if (!payment) throw Boom.notFound('Pago no encontrado')
       if (!payment.isMilestone) throw Boom.badRequest('Este pago no es un hito de obra')
       if (payment.milestoneStatus !== 'completado') {
@@ -638,11 +645,12 @@ async removeVoucher(id, fileName) {
             milestoneCompletedAt: '',
             commitmentDate: '',
             milestoneCompletedBy: ''
-            // milestoneNotes se mantiene como histórico
+            // milestoneNotes se conserva como histórico
           }
         }
       )
-      return this.getById(paymentId)
+
+      return await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al revertir el hito', error)
