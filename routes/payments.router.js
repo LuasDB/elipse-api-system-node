@@ -40,6 +40,16 @@ const paymentsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
+  router.get('/by-project/:projectId',
+  authenticate,
+  async (req, res, next) => {
+    try {
+      const data = await payments.getOpenContractsByProject(req.params.projectId)
+      res.json({ success: true, message: 'Contratos abiertos del proyecto', data })
+    } catch (err) { next(err) }
+  }
+)
+
   // Generar calendario de pagos para un contrato
   router.post('/generate/:contractId', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
@@ -82,17 +92,14 @@ const paymentsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
-  router.patch('/:id/milestone/commitment',
-  authenticate,
-    async (req, res, next) => {
-      try {
-        const result = await paymentsService.updateMilestoneCommitment(req.params.id, req.body)
-        // Emitir evento
-        req.io?.emit('payment:milestone:commitment-updated', { paymentId: req.params.id })
-        res.json({ success: true, message: 'Fecha compromiso actualizada', data: result })
-      } catch (err) { next(err) }
-    }
-  )
+  // [LÍNEA 2] Editar fecha compromiso de un hito ya completado
+  router.patch('/:id/milestone/commitment', authenticate, async (req, res, next) => {
+    try {
+      const result = await payments.updateMilestoneCommitment(req.params.id, req.body)
+      io.emit('milestone_commitment_updated', { paymentId: req.params.id, ...result })
+      res.status(200).json({ success: true, message: 'Fecha compromiso actualizada', data: result })
+    } catch (error) { next(error) }
+  })
 
   // Eliminar un pago
   router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {

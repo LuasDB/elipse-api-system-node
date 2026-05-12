@@ -7,28 +7,32 @@ class Contracts {
     this.collection = 'contracts'
   }
 
+  
   // Valida y normaliza milestones de Línea 2
   validateAndNormalizeMilestones(milestones) {
-    
     if (!Array.isArray(milestones) || milestones.length === 0) {
-      throw Boom.badData('Debe definir al menos un hito de obra')
+      throw Boom.badRequest('Debes proporcionar al menos un hito de obra')
     }
 
-    const normalized = milestones.map((m, idx) => {
-      if (!m.name || !m.name.trim()) {
-        throw Boom.badData(`El hito #${idx + 1} requiere un nombre`)
+    const normalized = []
+
+    milestones.forEach((m, idx) => {
+      if (!m.name?.trim()) throw Boom.badRequest(`Hito ${idx + 1}: nombre requerido`)
+      if (!m.amount || Number(m.amount) <= 0) throw Boom.badRequest(`Hito ${idx + 1}: monto inválido`)
+      if (!m.commitmentDate) throw Boom.badRequest(`Hito ${idx + 1}: fecha compromiso de entrega requerida`)
+
+      const commitmentDate = new Date(m.commitmentDate)
+      if (isNaN(commitmentDate.getTime())) {
+        throw Boom.badRequest(`Hito ${idx + 1}: fecha compromiso inválida`)
       }
-      const amount = Number(m.amount)
-      if (!amount || amount <= 0) {
-        throw Boom.badData(`El hito "${m.name}" requiere un monto mayor a 0`)
-      }
-      return {
+
+      normalized.push({
         name: m.name.trim(),
-        amount,
-        order: Number(m.order) || (idx + 1)
-      }
-    }).sort((a, b) => a.order - b.order)
-       .map((m, idx) => ({ ...m, order: idx + 1 }))
+        amount: Number(m.amount),
+        commitmentDate,
+        order: idx + 1
+      })
+    })
 
     return normalized
   }
@@ -111,6 +115,15 @@ class Contracts {
           { _id: new ObjectId(unitId) },
           { $set: { status: unitStatus, updatedAt: new Date() } }
         )
+      }
+
+      // Auto-generar calendario de pagos
+      try {
+        const { default: PaymentsService } = await import('./payments.service.js')
+        const paymentsService = new PaymentsService()
+        await paymentsService.generateSchedule(result.insertedId.toString())
+      } catch (genErr) {
+        console.error('Error al auto-generar calendario:', genErr)
       }
 
       return { _id: result.insertedId, ...contract }
@@ -242,29 +255,36 @@ class Contracts {
         dataToUpdate.milestonesTemplate !== undefined &&
         JSON.stringify(dataToUpdate.milestonesTemplate) !== JSON.stringify(existing.milestonesTemplate || [])
 
-      const shouldRegeneratePayments = modalityChanged || milestonesChanged
+      // Detectar cambios que requieren regeneración del calendario
+      const triggersRegeneration = [
+        'modality', 'salePrice', 'downPayment', 'monthlyPayment',
+        'totalPayments', 'milestonesTemplate', 'signDate', 'promiseDate'
+      ]
+      const shouldRegenerate = triggersRegeneration.some(field => field in dataToUpdate)
 
-      const result = await db.collection(this.collection).updateOne(
+      // Aplicar update
+      await db.collection(this.collection).updateOne(
         { _id: new ObjectId(id) },
-        { $set: dataToUpdate }
+        { $set: { ...dataToUpdate, updatedAt: new Date() } }
       )
 
-      if (result.matchedCount === 0) throw Boom.notFound('Contrato no encontrado')
-
-      // Actualizar estado de unidad si cambió
-      if (dataToUpdate.status && dataToUpdate.status !== existing.status) {
-        const unitStatus = this.getUnitStatusFromContract(dataToUpdate.status)
-        if (unitStatus && existing.unitId) {
-          await db.collection('units').updateOne(
-            { _id: new ObjectId(existing.unitId) },
-            { $set: { status: unitStatus, updatedAt: new Date() } }
-          )
+      // Regenerar calendario si aplica (preservando pagos cobrados)
+      let regenerationResult = null
+      if (shouldRegenerate) {
+        try {
+          const { default: PaymentsService } = await import('./payments.service.js')
+          const paymentsService = new PaymentsService()
+          regenerationResult = await paymentsService.regenerateSchedulePreservingPaid(id)
+        } catch (regenErr) {
+          console.error('Error al regenerar calendario:', regenErr)
         }
       }
 
+      const updated = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
       return {
-        modified: result.modifiedCount > 0,
-        shouldRegeneratePayments
+        ...updated,
+        regenerated: !!regenerationResult,
+        regenerationStats: regenerationResult || null
       }
     } catch (error) {
       if (Boom.isBoom(error)) throw error

@@ -116,7 +116,7 @@ class Payments {
             balance: m.amount,
             currency: 'USD',
             contractExchangeRate: contract.exchangeRate || null,
-            dueDate: null,                  // Los hitos no tienen vencimiento
+            dueDate: m.commitmentDate ? new Date(m.commitmentDate) : null,
             paidDate: null,
             status: 'pendiente',
             paymentMethod: null,
@@ -126,11 +126,11 @@ class Payments {
             isMilestone: true,
             milestoneName: m.name,
             milestoneOrder: m.order,
-            milestoneStatus: 'pendiente',   // 'pendiente' | 'completado'
+            milestoneStatus: 'pendiente',
             milestoneCompletedAt: null,
             milestoneCompletedBy: null,
             milestoneNotes: null,
-            commitmentDate: null,           // Se llena al completar el hito
+            commitmentDate: m.commitmentDate ? new Date(m.commitmentDate) : null,
             movements: [],
             createdAt: now,
             updatedAt: now
@@ -148,6 +148,54 @@ class Payments {
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al generar calendario de pagos', error)
+    }
+  }
+
+  async regenerateSchedulePreservingPaid(contractId) {
+    try {
+      if (!ObjectId.isValid(contractId)) throw Boom.badRequest('ID de contrato no válido')
+
+      // 1. Identificar pagos cobrados (parciales o totales) que se preservan
+      const existingPayments = await db.collection(this.collection)
+        .find({ contractId: contractId.toString() })
+        .toArray()
+
+      const paidPayments = existingPayments.filter(p => (p.paidAmount || 0) > 0)
+      const unpaidIds = existingPayments
+        .filter(p => (p.paidAmount || 0) === 0)
+        .map(p => p._id)
+
+      // 2. Borrar solo los no cobrados
+      if (unpaidIds.length > 0) {
+        await db.collection(this.collection).deleteMany({ _id: { $in: unpaidIds } })
+      }
+
+      // 3. Generar el nuevo calendario solo si NO había pagos cobrados aún
+      //    (si ya hay cobros, NO sobrescribimos nada — el calendario queda como está
+      //     menos los no cobrados que ya borramos. El usuario verá inconsistencia visual
+      //     deliberada para forzar revisión manual.)
+      if (paidPayments.length === 0) {
+        const result = await this.generateSchedule(contractId)
+        return {
+          preserved: 0,
+          removed: unpaidIds.length,
+          generated: result.count || 0,
+          fullRegeneration: true
+        }
+      }
+
+      // Si hay pagos cobrados, dejamos solo esos en la BD.
+      // El usuario debe completar el resto manualmente si lo necesita.
+      return {
+        preserved: paidPayments.length,
+        removed: unpaidIds.length,
+        generated: 0,
+        fullRegeneration: false,
+        warning: 'Se conservaron pagos con movimientos. No se regeneró el calendario completo para evitar perder histórico.'
+      }
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al regenerar calendario', error)
     }
   }
 
@@ -377,6 +425,61 @@ class Payments {
         }
       ]).toArray()
 
+      // Semáforo de hitos (solo los pendientes/sin completar)
+      const today = new Date()
+      today.setHours(0, 0, 0, 0)
+
+      const in15Days = new Date(today)
+      in15Days.setDate(in15Days.getDate() + 15)
+
+      const milestonesTraffic = await db.collection(this.collection).aggregate([
+        {
+          $match: {
+            isMilestone: true,
+            milestoneStatus: 'pendiente',
+            commitmentDate: { $ne: null }
+          }
+        },
+        {
+          $lookup: {
+            from: 'contracts',
+            localField: 'contractId',
+            foreignField: '_id',
+            as: 'contract'
+          }
+        },
+        { $unwind: { path: '$contract', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 1,
+            concept: 1,
+            milestoneName: 1,
+            expectedAmount: 1,
+            paidAmount: 1,
+            commitmentDate: 1,
+            contractNumber: '$contract.contractNumber',
+            buyerName: '$contract.buyerName',
+            unitIdentifier: '$contract.unitIdentifier',
+            projectId: '$contract.projectId',
+            light: {
+              $switch: {
+                branches: [
+                  { case: { $lt: ['$commitmentDate', today] }, then: 'red' },
+                  { case: { $lte: ['$commitmentDate', in15Days] }, then: 'yellow' }
+                ],
+                default: 'green'
+              }
+            }
+          }
+        }
+      ]).toArray()
+
+      const trafficCounts = {
+        red: milestonesTraffic.filter(m => m.light === 'red').length,
+        yellow: milestonesTraffic.filter(m => m.light === 'yellow').length,
+        green: milestonesTraffic.filter(m => m.light === 'green').length
+      }
+
       return {
         overdue: { total: overdue[0]?.total || 0, count: overdue[0]?.count || 0 },
         dueThisMonth: { total: dueThisMonth[0]?.total || 0, count: dueThisMonth[0]?.count || 0 },
@@ -386,6 +489,9 @@ class Payments {
           count: milestonesPendingCompletion.length,
           total: milestonesPendingCompletion.reduce((s, m) => s + (m.paidAmount || 0), 0),
           items: milestonesPendingCompletion
+        },milestonesTraffic: {
+          counts: trafficCounts,
+          items: milestonesTraffic
         }
       }
     } catch (error) {
@@ -654,6 +760,58 @@ async removeVoucher(id, fileName) {
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al revertir el hito', error)
+    }
+  }
+
+  async getOpenContractsByProject(projectId) {
+    try {
+      if (!ObjectId.isValid(projectId)) throw Boom.badRequest('ID de proyecto no válido')
+
+      // 1. Buscar contratos del proyecto que tengan pagos con saldo > 0
+      const contracts = await db.collection('contracts').aggregate([
+        {
+          $match: {
+            projectId: projectId.toString(),
+            status: { $nin: ['cancelado'] } // Excluir solo cancelados; saldo > 0 lo decide el siguiente paso
+          }
+        },
+        {
+          $lookup: {
+            from: 'payments',
+            let: { contractIdStr: { $toString: '$_id' } },
+            pipeline: [
+              { $match: { $expr: { $eq: ['$contractId', '$$contractIdStr'] } } },
+              { $sort: { paymentNumber: 1 } }
+            ],
+            as: 'payments'
+          }
+        },
+        {
+          // Calcular agregados
+          $addFields: {
+            totalExpected: { $sum: '$payments.expectedAmount' },
+            totalPaid: { $sum: '$payments.paidAmount' },
+            totalBalance: { $sum: '$payments.balance' },
+            paymentsCount: { $size: '$payments' },
+            paidCount: {
+              $size: { $filter: { input: '$payments', cond: { $eq: ['$$this.status', 'pagado'] } } }
+            },
+            overdueCount: {
+              $size: { $filter: { input: '$payments', cond: { $eq: ['$$this.status', 'vencido'] } } }
+            }
+          }
+        },
+        {
+          // Solo contratos con saldo > 0 (= "abiertos" según definición del cliente)
+          $match: { totalBalance: { $gt: 0 } }
+        },
+        { $sort: { createdAt: -1 } }
+      ]).toArray()
+
+      return contracts
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al obtener contratos del proyecto', error)
     }
   }
 }
