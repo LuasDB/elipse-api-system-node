@@ -36,8 +36,6 @@ const contractsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
-  
-
   router.patch('/:id', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
       const result = await contracts.updateOneById(req.params.id, req.body)

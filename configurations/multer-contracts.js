@@ -26,7 +26,7 @@ const contractStorage = (contractId) =>{
 const uploadContractFiles = (contractId)=>{
     return multer({
         storage:contractStorage(contractId),
-        limits:{fileSize:10*1024*1024}, //10MB por archivo
+        limits:{fileSize:20*1024*1024}, //20MB por archivo
         fileFilter:(req,file,cb)=>{
             const allowedTypes = [
                 'application/pdf',
