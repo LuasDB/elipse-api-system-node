@@ -69,7 +69,6 @@ const startServer = async ()=>{
     //Estaticos en caso de usar almacenamiento en el servidor
     app.use('/uploads', express.static('uploads'))
     // Iniciar tareas programadas de limpieza
-    scheduleFileCleanup()
     //Iniciar el servidor
     httpServer.listen(3000,()=>{
       console.log(`🚀 Servidor iniciado en puerto: ${port}`)
