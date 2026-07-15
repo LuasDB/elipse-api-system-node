@@ -1,6 +1,7 @@
 import { ObjectId } from 'mongodb'
 import { db } from '../db/mongoClient.js'
 import  Boom  from "@hapi/boom"
+import bcrypt from 'bcrypt'
 
 class Users{
   constructor(){}
@@ -34,7 +35,7 @@ class Users{
   }
   async getOneById(id){
     try {
-      if(!ObjetctId.isValid(id)){
+      if(!ObjectId.isValid(id)){
         throw Boom.badImplementation(`El ID ${id} no es un ID valido`)
       }
       const user = await db.collection('users')
@@ -62,6 +63,10 @@ class Users{
       }
 
       const { _id,...dataToUpdate } = newData
+
+      if(dataToUpdate.password){
+        dataToUpdate.password = await bcrypt.hash(dataToUpdate.password, 10)
+      }
 
       const updateOne = await db.collection('users').updateOne(
         {_id: new ObjectId(id)},

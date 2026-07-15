@@ -15,6 +15,14 @@ const usersRouter = (io)=>{
         active:req.query.active,
         search:req.query.search
       }
+
+      // El módulo de Usuarios es solo para admin. Se exceptúa la búsqueda
+      // de vendedores, que otros roles necesitan para asignar el vendedor de un contrato.
+      const isSellerLookup = filter.role === 'vendedor' && !filter.search
+      if(req.user.role !== 'admin' && !isSellerLookup){
+        throw Boom.forbidden('No tienes permiso para ver el listado de usuarios')
+      }
+
       const result = await user.getAll(filter)
 
       res.status(200).json({
@@ -26,10 +34,9 @@ const usersRouter = (io)=>{
     }
   })
 
-  router.get('/:id',authenticate,async(req, res,next )=>{
+  router.get('/:id',authenticate,authorize('admin'),async(req, res,next )=>{
     try {
       const { id } = req.params
-      console.log('Endpoint UNO')
       const result = await user.getOneById(id)
 
       res.status(200).json({

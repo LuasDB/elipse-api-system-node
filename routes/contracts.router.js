@@ -1,4 +1,5 @@
 import express from 'express'
+import Boom from '@hapi/boom'
 import Contracts from './../services/contracts.service.js'
 import { authenticate, authorize } from './../middlewares/authMiddleware.js'
 
@@ -16,6 +17,9 @@ const contractsRouter = (io) => {
         sellerId: req.query.sellerId,
         search: req.query.search
       }
+      if (req.user.role === 'vendedor') {
+        filters.sellerId = req.user._id
+      }
       const result = await contracts.getAll(filters)
       res.status(200).json({ success: true, message: 'Contratos obtenidos', data: result })
     } catch (error) { next(error) }
@@ -24,6 +28,9 @@ const contractsRouter = (io) => {
   router.get('/:id', authenticate, async (req, res, next) => {
     try {
       const result = await contracts.getOneById(req.params.id)
+      if (req.user.role === 'vendedor' && String(result.sellerId) !== String(req.user._id)) {
+        throw Boom.forbidden('No tienes permiso para ver este contrato')
+      }
       res.status(200).json({ success: true, message: 'Contrato obtenido', data: result })
     } catch (error) { next(error) }
   })

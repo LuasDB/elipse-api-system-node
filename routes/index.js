@@ -6,6 +6,9 @@ import unitsRouter from './units.router.js'
 import buyersRouter from './buyers.router.js'
 import contractsRouter from './contracts.router.js'
 import paymentsRouter from './payments.router.js'
+import sellersRouter from './sellers.router.js'
+import commissionsRouter from './commissions.router.js'
+import reportsRouter from './reports.router.js'
 
 const router = express.Router()
 
@@ -19,6 +22,9 @@ const AppRouter = (app,io) => {
   router.use('/buyers', buyersRouter(io))
   router.use('/contracts', contractsRouter(io))
   router.use('/payments', paymentsRouter(io))
+  router.use('/sellers', sellersRouter(io))
+  router.use('/commissions', commissionsRouter(io))
+  router.use('/reports', reportsRouter(io))
 
 }
 

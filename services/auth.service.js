@@ -157,7 +157,7 @@ class Auth{
     try {
       const decoded = jwt.verify(token,this.jwtSecret)
 
-      const user = this.getUserByEmail(decoded.email)
+      const user = await this.getUserByEmail(decoded.email)
 
       const hashedPassword = await bcrypt.hash(newPassword,10)
 

@@ -1,22 +1,34 @@
 import express from 'express'
+import Boom from '@hapi/boom'
 import Payments from './../services/payments.service.js'
+import Contracts from './../services/contracts.service.js'
 import { authenticate, authorize } from './../middlewares/authMiddleware.js'
 
 const router = express.Router()
 const payments = new Payments()
+const contracts = new Contracts()
+
+// Lanza Boom.forbidden si un vendedor intenta ver el seguimiento de pagos de un contrato ajeno
+const assertContractOwnership = async (req, contractId) => {
+  if (req.user.role !== 'vendedor') return
+  const sellerId = await contracts.getSellerId(contractId)
+  if (String(sellerId) !== String(req.user._id)) {
+    throw Boom.forbidden('No tienes permiso para ver los pagos de este contrato')
+  }
+}
 
 const paymentsRouter = (io) => {
 
-  // Alertas globales (dashboard)
-  router.get('/alerts', authenticate, async (req, res, next) => {
+  // Alertas globales (dashboard) — el vendedor no tiene acceso al dashboard
+  router.get('/alerts', authenticate, authorize('admin', 'gerente', 'cobranza'), async (req, res, next) => {
     try {
       const result = await payments.getAlerts()
       res.status(200).json({ success: true, message: 'Alertas obtenidas', data: result })
     } catch (error) { next(error) }
   })
 
-  // Cobranza por periodo (dashboard)
-  router.get('/collections-by-period', authenticate, async (req, res, next) => {
+  // Cobranza por periodo (dashboard) — el vendedor no tiene acceso al dashboard
+  router.get('/collections-by-period', authenticate, authorize('admin', 'gerente', 'cobranza'), async (req, res, next) => {
     try {
       const { startDate, endDate } = req.query
       const result = await payments.getCollectionsByPeriod(startDate, endDate)
@@ -27,6 +39,7 @@ const paymentsRouter = (io) => {
   // Resumen financiero de un contrato
   router.get('/summary/:contractId', authenticate, async (req, res, next) => {
     try {
+      await assertContractOwnership(req, req.params.contractId)
       const result = await payments.getContractSummary(req.params.contractId)
       res.status(200).json({ success: true, message: 'Resumen obtenido', data: result })
     } catch (error) { next(error) }
@@ -35,6 +48,7 @@ const paymentsRouter = (io) => {
   // Obtener pagos de un contrato
   router.get('/contract/:contractId', authenticate, async (req, res, next) => {
     try {
+      await assertContractOwnership(req, req.params.contractId)
       const result = await payments.getByContract(req.params.contractId)
       res.status(200).json({ success: true, message: 'Pagos obtenidos', data: result })
     } catch (error) { next(error) }
@@ -44,7 +58,8 @@ const paymentsRouter = (io) => {
   authenticate,
   async (req, res, next) => {
     try {
-      const data = await payments.getOpenContractsByProject(req.params.projectId)
+      const sellerId = req.user.role === 'vendedor' ? req.user._id : null
+      const data = await payments.getOpenContractsByProject(req.params.projectId, sellerId)
       res.json({ success: true, message: 'Contratos abiertos del proyecto', data })
     } catch (err) { next(err) }
   }

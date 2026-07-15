@@ -363,7 +363,7 @@ class Payments {
       const [overdue, dueThisMonth, collected, upcoming] = await Promise.all([
         // Pagos vencidos
         db.collection(this.collection).aggregate([
-          { $match: { status: { $in: ['pendiente', 'parcial'] }, dueDate: { $lt: now } } },
+          { $match: { status: { $in: ['pendiente', 'parcial', 'vencido'] }, dueDate: { $lt: now } } },
           { $group: { _id: null, total: { $sum: '$balance' }, count: { $sum: 1 } } }
         ]).toArray(),
         // Vencen este mes
@@ -517,36 +517,50 @@ class Payments {
         throw Boom.badData('La fecha de inicio no puede ser posterior a la fecha de fin')
       }
 
-      // Aggregation: desplegamos todos los movements y filtramos por rango de fecha
-      const result = await db.collection(this.collection).aggregate([
-        { $match: { movements: { $exists: true, $ne: [] } } },
-        { $unwind: '$movements' },
-        {
-          $match: {
-            'movements.registeredAt': { $gte: start, $lte: end }
+      // Una fecha "YYYY-MM-DD" se parsea como medianoche UTC (inicio del día), no su fin.
+      // Usada tal cual como límite superior, excluye la actividad del propio día final
+      // (p. ej. "hasta hoy" daba 0 para lo registrado hoy). Extendemos al final del día en UTC.
+      const queryEnd = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate(), 23, 59, 59, 999))
+
+      // Aggregation: desplegamos todos los movements y filtramos por rango de fecha.
+      // Se usa la fecha del TC (exchangeRateDate) como fecha de pago real, no
+      // registeredAt (que es solo cuándo se capturó el movimiento en el sistema).
+      const [result, soldResult] = await Promise.all([
+        db.collection(this.collection).aggregate([
+          { $match: { movements: { $exists: true, $ne: [] } } },
+          { $unwind: '$movements' },
+          {
+            $match: {
+              'movements.exchangeRateDate': { $gte: start, $lte: queryEnd }
+            }
+          },
+          {
+            $group: {
+              _id: null,
+              totalUSD: { $sum: '$movements.amount' },
+              totalMXN: { $sum: { $ifNull: ['$movements.mxnEquivalent', 0] } },
+              movementsCount: { $sum: 1 },
+              uniquePayments: { $addToSet: '$_id' },
+              uniqueContracts: { $addToSet: '$contractId' }
+            }
+          },
+          {
+            $project: {
+              _id: 0,
+              totalUSD: { $round: ['$totalUSD', 2] },
+              totalMXN: { $round: ['$totalMXN', 2] },
+              movementsCount: 1,
+              paymentsCount: { $size: '$uniquePayments' },
+              contractsCount: { $size: '$uniqueContracts' }
+            }
           }
-        },
-        {
-          $group: {
-            _id: null,
-            totalUSD: { $sum: '$movements.amount' },
-            totalMXN: { $sum: { $ifNull: ['$movements.mxnEquivalent', 0] } },
-            movementsCount: { $sum: 1 },
-            uniquePayments: { $addToSet: '$_id' },
-            uniqueContracts: { $addToSet: '$contractId' }
-          }
-        },
-        {
-          $project: {
-            _id: 0,
-            totalUSD: { $round: ['$totalUSD', 2] },
-            totalMXN: { $round: ['$totalMXN', 2] },
-            movementsCount: 1,
-            paymentsCount: { $size: '$uniquePayments' },
-            contractsCount: { $size: '$uniqueContracts' }
-          }
-        }
-      ]).toArray()
+        ]).toArray(),
+        // Vendido: contratos no cancelados creados dentro del mismo rango
+        db.collection('contracts').aggregate([
+          { $match: { status: { $ne: 'cancelado' }, createdAt: { $gte: start, $lte: queryEnd } } },
+          { $group: { _id: null, totalSoldUSD: { $sum: '$salePrice' } } }
+        ]).toArray()
+      ])
 
       const summary = result[0] || {
         totalUSD: 0,
@@ -555,6 +569,7 @@ class Payments {
         paymentsCount: 0,
         contractsCount: 0
       }
+      summary.totalSoldUSD = soldResult[0]?.totalSoldUSD || 0
 
       // TC promedio ponderado del periodo (útil para mostrar referencia)
       const averageRate = summary.totalUSD > 0
@@ -763,17 +778,20 @@ async removeVoucher(id, fileName) {
     }
   }
 
-  async getOpenContractsByProject(projectId) {
+  async getOpenContractsByProject(projectId, sellerId = null) {
     try {
       if (!ObjectId.isValid(projectId)) throw Boom.badRequest('ID de proyecto no válido')
+
+      const matchStage = {
+        projectId: projectId.toString(),
+        status: { $nin: ['cancelado'] } // Excluir solo cancelados; saldo > 0 lo decide el siguiente paso
+      }
+      if (sellerId) matchStage.sellerId = sellerId
 
       // 1. Buscar contratos del proyecto que tengan pagos con saldo > 0
       const contracts = await db.collection('contracts').aggregate([
         {
-          $match: {
-            projectId: projectId.toString(),
-            status: { $nin: ['cancelado'] } // Excluir solo cancelados; saldo > 0 lo decide el siguiente paso
-          }
+          $match: matchStage
         },
         {
           $lookup: {

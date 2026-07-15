@@ -181,6 +181,21 @@ class Contracts {
     }
   }
 
+  async getSellerId(id) {
+    try {
+      if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID del contrato no es válido')
+      const contract = await db.collection(this.collection).findOne(
+        { _id: new ObjectId(id) },
+        { projection: { sellerId: 1 } }
+      )
+      if (!contract) throw Boom.notFound(`No se encontró el contrato con ID ${id}`)
+      return contract.sellerId
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al obtener el contrato', error)
+    }
+  }
+
   async getOneById(id) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID del contrato no es válido')
@@ -206,7 +221,9 @@ class Contracts {
         )
       }
 
-      return { ...contract, buyer, unit, project, seller }
+      const commission = await db.collection('commissions').findOne({ contractId: id })
+
+      return { ...contract, buyer, unit, project, seller, commission: commission || null }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al obtener el contrato', error)
