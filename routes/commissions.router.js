@@ -48,6 +48,51 @@ const commissionsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
+  // Subir comprobantes de un pago de comisión (admin, gerente)
+  router.post('/contract/:contractId/payments/:movementId/vouchers', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+    try {
+      const { contractId, movementId } = req.params
+      const { default: uploadCommissionFiles } = await import('./../configurations/multer-commissions.js')
+      const upload = uploadCommissionFiles(contractId)
+
+      upload.array('vouchers', 5)(req, res, async (err) => {
+        if (err) {
+          if (err.code === 'LIMIT_FILE_SIZE') {
+            return next(Boom.badRequest('El archivo excede el límite de 10MB'))
+          }
+          return next(Boom.badRequest(err.message))
+        }
+
+        if (!req.files || req.files.length === 0) {
+          return next(Boom.badRequest('No se recibieron archivos'))
+        }
+
+        try {
+          const result = await commissions.addVoucherToMovement(contractId, movementId, req.files)
+          io.emit('commission_voucher_added', { contractId, message: 'Comprobante de comisión agregado' })
+          res.status(200).json({
+            success: true,
+            message: `${req.files.length} comprobante(s) subido(s)`,
+            data: result
+          })
+        } catch (error) {
+          next(error)
+        }
+      })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  // Eliminar un comprobante de un pago de comisión (admin, gerente)
+  router.delete('/contract/:contractId/payments/:movementId/vouchers/:fileName', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+    try {
+      const { contractId, movementId, fileName } = req.params
+      const result = await commissions.removeVoucherFromMovement(contractId, movementId, fileName)
+      res.status(200).json({ success: true, message: 'Comprobante eliminado', data: result })
+    } catch (error) { next(error) }
+  })
+
   // Listar comisiones de un vendedor
   router.get('/seller/:sellerId', authenticate, async (req, res, next) => {
     try {

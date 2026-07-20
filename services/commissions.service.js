@@ -105,7 +105,7 @@ class Commissions {
     }
   }
 
-  async registerPayment(contractId, { amount, paymentMethod, reference, notes, registeredBy } = {}) {
+  async registerPayment(contractId, { amount, paymentMethod, reference, notes, paymentDate, registeredBy } = {}) {
     try {
       const commission = await db.collection(this.collection).findOne({ contractId })
       if (!commission) throw Boom.notFound('No hay comisión asignada para este contrato')
@@ -122,10 +122,13 @@ class Commissions {
       const newStatus = newBalance <= 0 ? 'pagado' : 'parcial'
 
       const movement = {
+        _id: new ObjectId(),
         amount: value,
         paymentMethod: paymentMethod || null,
         reference: reference || null,
         notes: notes || null,
+        paymentDate: paymentDate ? new Date(paymentDate) : now,
+        vouchers: [],
         registeredAt: now,
         registeredBy: registeredBy || null
       }
@@ -143,10 +146,67 @@ class Commissions {
         }
       )
 
-      return await db.collection(this.collection).findOne({ _id: commission._id })
+      const updated = await db.collection(this.collection).findOne({ _id: commission._id })
+      return { ...updated, movement }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al registrar el pago de comisión', error)
+    }
+  }
+
+  async addVoucherToMovement(contractId, movementId, files) {
+    try {
+      if (!ObjectId.isValid(movementId)) throw Boom.badRequest('ID de movimiento no válido')
+
+      const commission = await db.collection(this.collection).findOne({ contractId, 'movements._id': new ObjectId(movementId) })
+      if (!commission) throw Boom.notFound('Movimiento de pago de comisión no encontrado')
+
+      const vouchers = files.map(file => ({
+        originalName: file.originalname,
+        fileName: file.filename,
+        path: file.path,
+        size: file.size,
+        mimetype: file.mimetype,
+        uploadedAt: new Date()
+      }))
+
+      await db.collection(this.collection).updateOne(
+        { contractId, 'movements._id': new ObjectId(movementId) },
+        {
+          $push: { 'movements.$.vouchers': { $each: vouchers } },
+          $set: { updatedAt: new Date() }
+        }
+      )
+
+      return { added: vouchers.length, vouchers }
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al agregar comprobantes de comisión', error)
+    }
+  }
+
+  async removeVoucherFromMovement(contractId, movementId, fileName) {
+    try {
+      if (!ObjectId.isValid(movementId)) throw Boom.badRequest('ID de movimiento no válido')
+
+      await db.collection(this.collection).updateOne(
+        { contractId, 'movements._id': new ObjectId(movementId) },
+        {
+          $pull: { 'movements.$.vouchers': { fileName } },
+          $set: { updatedAt: new Date() }
+        }
+      )
+
+      const filePath = `uploads/commissions/${contractId}/${fileName}`
+      const fs = await import('fs')
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath)
+      }
+
+      return { removed: fileName }
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al eliminar comprobante de comisión', error)
     }
   }
 
