@@ -360,37 +360,83 @@ class Payments {
       const next30 = new Date()
       next30.setDate(next30.getDate() + 30)
 
-      const [overdue, dueThisMonth, collected, upcoming] = await Promise.all([
+      // Pipeline compartido: adjunta datos de contacto del comprador (correo/teléfono)
+      // para poder mostrar listas accionables de pagos vencidos/por vencer en el dashboard.
+      // contractId (en payments) y buyerId (en contracts) se guardan como string, por eso
+      // el match se hace contra $toString('$_id') en lugar de un $lookup directo por _id.
+      const buildAlertPipeline = (match) => ([
+        { $match: match },
+        {
+          $lookup: {
+            from: 'contracts',
+            let: { cid: '$contractId' },
+            pipeline: [
+              { $match: { $expr: { $eq: [{ $toString: '$_id' }, '$$cid'] } } },
+              { $project: { buyerId: 1, contractNumber: 1, projectId: 1 } }
+            ],
+            as: 'contract'
+          }
+        },
+        { $unwind: { path: '$contract', preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: 'buyers',
+            let: { bid: '$contract.buyerId' },
+            pipeline: [
+              { $match: { $expr: { $eq: [{ $toString: '$_id' }, '$$bid'] } } },
+              { $project: { email: 1, phone: 1 } }
+            ],
+            as: 'buyer'
+          }
+        },
+        { $unwind: { path: '$buyer', preserveNullAndEmptyArrays: true } },
+        { $sort: { dueDate: 1 } },
+        {
+          $project: {
+            _id: 1,
+            contractId: 1,
+            contractNumber: '$contract.contractNumber',
+            projectId: '$contract.projectId',
+            buyerId: '$contract.buyerId',
+            buyerName: 1,
+            buyerEmail: '$buyer.email',
+            buyerPhone: '$buyer.phone',
+            unitIdentifier: 1,
+            concept: 1,
+            expectedAmount: 1,
+            paidAmount: 1,
+            balance: 1,
+            currency: 1,
+            dueDate: 1,
+            status: 1
+          }
+        }
+      ])
+
+      const summarize = (items) => ({
+        total: items.reduce((sum, p) => sum + (p.balance || 0), 0),
+        count: items.length,
+        items
+      })
+
+      const [overdueItems, dueThisMonthItems, collected, upcomingItems] = await Promise.all([
         // Pagos vencidos
-        db.collection(this.collection).aggregate([
-          { $match: { status: { $in: ['pendiente', 'parcial', 'vencido'] }, dueDate: { $lt: now } } },
-          { $group: { _id: null, total: { $sum: '$balance' }, count: { $sum: 1 } } }
-        ]).toArray(),
+        db.collection(this.collection).aggregate(
+          buildAlertPipeline({ status: { $in: ['pendiente', 'parcial', 'vencido'] }, dueDate: { $lt: now } })
+        ).toArray(),
         // Vencen este mes
-        db.collection(this.collection).aggregate([
-          { $match: { status: { $in: ['pendiente', 'parcial'] }, dueDate: { $gte: startOfMonth, $lte: endOfMonth } } },
-          { $group: { _id: null, total: { $sum: '$balance' }, count: { $sum: 1 } } }
-        ]).toArray(),
+        db.collection(this.collection).aggregate(
+          buildAlertPipeline({ status: { $in: ['pendiente', 'parcial'] }, dueDate: { $gte: startOfMonth, $lte: endOfMonth } })
+        ).toArray(),
         // Cobrado este mes
         db.collection(this.collection).aggregate([
           { $match: { paidDate: { $gte: startOfMonth, $lte: endOfMonth }, status: 'pagado' } },
           { $group: { _id: null, total: { $sum: '$paidAmount' }, count: { $sum: 1 } } }
         ]).toArray(),
         // Próximos 30 días
-        db.collection(this.collection).aggregate([
-          { $match: { status: { $in: ['pendiente', 'parcial'] }, dueDate: { $gte: now, $lte: next30 } } },
-          { $group: { _id: null, count: { $sum: 1 } } }
-        ]).toArray(),
-        // [LÍNEA 2] Hitos completados pero pendientes de cobro
-        db.collection(this.collection).aggregate([
-          { $match: { isMilestone: true, milestoneStatus: 'completado', status: { $in: ['pendiente', 'parcial'] } } },
-          { $group: { _id: null, total: { $sum: '$balance' }, count: { $sum: 1 } } }
-        ]).toArray(),
-        // [LÍNEA 2] Hitos atrasados (fecha estimada vencida y aún pendientes)
-        db.collection(this.collection).aggregate([
-          { $match: { isMilestone: true, milestoneStatus: 'pendiente', estimatedDate: { $lt: now, $ne: null } } },
-          { $group: { _id: null, count: { $sum: 1 } } }
-        ]).toArray(),
+        db.collection(this.collection).aggregate(
+          buildAlertPipeline({ status: { $in: ['pendiente', 'parcial'] }, dueDate: { $gte: now, $lte: next30 } })
+        ).toArray(),
       ])
 
       // Hitos pagados pendientes de marcar como completados
@@ -481,10 +527,10 @@ class Payments {
       }
 
       return {
-        overdue: { total: overdue[0]?.total || 0, count: overdue[0]?.count || 0 },
-        dueThisMonth: { total: dueThisMonth[0]?.total || 0, count: dueThisMonth[0]?.count || 0 },
+        overdue: summarize(overdueItems),
+        dueThisMonth: summarize(dueThisMonthItems),
         collected: { total: collected[0]?.total || 0, count: collected[0]?.count || 0 },
-        upcoming: { count: upcoming[0]?.count || 0 },
+        upcoming: summarize(upcomingItems),
         milestonesPendingCompletion: {
           count: milestonesPendingCompletion.length,
           total: milestonesPendingCompletion.reduce((s, m) => s + (m.paidAmount || 0), 0),
