@@ -68,17 +68,31 @@ class Sellers {
       )
       if (!seller) throw Boom.notFound(`No se encontró el vendedor con ID ${id}`)
 
-      const contracts = await db.collection('contracts')
+      // Contratos donde es el vendedor principal + contratos donde solo tiene una
+      // comisión asignada (vendedor secundario agregado vía el panel de comisiones)
+      const primaryContracts = await db.collection('contracts')
         .find({ sellerId: id })
         .sort({ createdAt: -1 })
         .toArray()
 
-      const contractsWithCommission = await Promise.all(
-        contracts.map(async (contract) => {
-          const commission = await this.commissions.getByContract(contract._id.toString())
-          return { ...contract, commission }
-        })
-      )
+      const ownCommissions = await this.commissions.getBySeller(id)
+      const primaryIds = new Set(primaryContracts.map(c => c._id.toString()))
+      const secondaryContractIds = [...new Set(ownCommissions.map(c => c.contractId))]
+        .filter(cid => !primaryIds.has(cid) && ObjectId.isValid(cid))
+
+      const secondaryContracts = secondaryContractIds.length
+        ? await db.collection('contracts')
+          .find({ _id: { $in: secondaryContractIds.map(cid => new ObjectId(cid)) } })
+          .sort({ createdAt: -1 })
+          .toArray()
+        : []
+
+      const contracts = [...primaryContracts, ...secondaryContracts]
+
+      const contractsWithCommission = contracts.map((contract) => {
+        const commission = ownCommissions.find(c => c.contractId === contract._id.toString()) || null
+        return { ...contract, commission }
+      })
 
       const [contractStats, commissionSummary] = await Promise.all([
         this._getContractStats(id),

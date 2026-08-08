@@ -2,8 +2,8 @@ import multer from 'multer'
 import path from 'path'
 import fs from 'fs'
 
-const commissionStorage = (contractId) => {
-  const uploadPath = `uploads/commissions/${contractId}`
+const commissionStorage = (contractId, sellerId) => {
+  const uploadPath = `uploads/commissions/${contractId}/${sellerId}`
   if (!fs.existsSync(uploadPath)) {
     fs.mkdirSync(uploadPath, { recursive: true })
   }
@@ -24,9 +24,9 @@ const commissionStorage = (contractId) => {
   })
 }
 
-const uploadCommissionFiles = (contractId) => {
+const uploadCommissionFiles = (contractId, sellerId) => {
   return multer({
-    storage: commissionStorage(contractId),
+    storage: commissionStorage(contractId, sellerId),
     limits: { fileSize: 10 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
       const allowedTypes = [

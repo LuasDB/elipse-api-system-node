@@ -16,44 +16,59 @@ const commissionsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
-  // Asignar / actualizar el % de comisión de un contrato (solo admin)
-  router.patch('/contract/:contractId', authenticate, authorize('admin'), async (req, res, next) => {
-    try {
-      const result = await commissions.assign(req.params.contractId, {
-        ...req.body,
-        assignedBy: req.user?._id || req.user?.id || null
-      })
-      io.emit('commission_assigned', { contractId: req.params.contractId, message: 'Comisión asignada' })
-      res.status(200).json({ success: true, message: 'Comisión asignada', data: result })
-    } catch (error) { next(error) }
-  })
-
-  // Obtener la comisión de un contrato
+  // Obtener las comisiones (uno o más vendedores) de un contrato
   router.get('/contract/:contractId', authenticate, async (req, res, next) => {
     try {
       const result = await commissions.getByContract(req.params.contractId)
-      res.status(200).json({ success: true, message: 'Comisión obtenida', data: result })
+      res.status(200).json({ success: true, message: 'Comisiones obtenidas', data: result })
     } catch (error) { next(error) }
   })
 
-  // Registrar un pago de comisión al vendedor (admin, gerente)
-  router.post('/contract/:contractId/payments', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+  // Agregar un vendedor con su comisión a un contrato (solo admin)
+  router.post('/contract/:contractId/sellers', authenticate, authorize('admin'), async (req, res, next) => {
     try {
-      const result = await commissions.registerPayment(req.params.contractId, {
+      const result = await commissions.addSeller(req.params.contractId, req.body, req.user?._id || req.user?.id || null)
+      io.emit('commission_assigned', { contractId: req.params.contractId, message: 'Comisión asignada' })
+      res.status(201).json({ success: true, message: 'Vendedor agregado al contrato', data: result })
+    } catch (error) { next(error) }
+  })
+
+  // Actualizar el monto/descripción de la comisión de un vendedor en un contrato (solo admin)
+  router.patch('/contract/:contractId/sellers/:sellerId', authenticate, authorize('admin'), async (req, res, next) => {
+    try {
+      const result = await commissions.updateSeller(req.params.contractId, req.params.sellerId, req.body, req.user?._id || req.user?.id || null)
+      io.emit('commission_assigned', { contractId: req.params.contractId, message: 'Comisión actualizada' })
+      res.status(200).json({ success: true, message: 'Comisión actualizada', data: result })
+    } catch (error) { next(error) }
+  })
+
+  // Quitar a un vendedor de un contrato (solo admin, solo si no tiene pagos registrados)
+  router.delete('/contract/:contractId/sellers/:sellerId', authenticate, authorize('admin'), async (req, res, next) => {
+    try {
+      const result = await commissions.removeSeller(req.params.contractId, req.params.sellerId)
+      io.emit('commission_assigned', { contractId: req.params.contractId, message: 'Vendedor quitado del contrato' })
+      res.status(200).json({ success: true, message: 'Vendedor quitado del contrato', data: result })
+    } catch (error) { next(error) }
+  })
+
+  // Registrar un pago de comisión a un vendedor de un contrato (admin, gerente)
+  router.post('/contract/:contractId/sellers/:sellerId/payments', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+    try {
+      const result = await commissions.registerPayment(req.params.contractId, req.params.sellerId, {
         ...req.body,
         registeredBy: req.user?.name || req.user?.email
       })
-      io.emit('commission_payment_registered', { contractId: req.params.contractId, message: 'Pago de comisión registrado' })
+      io.emit('commission_payment_registered', { contractId: req.params.contractId, sellerId: req.params.sellerId, message: 'Pago de comisión registrado' })
       res.status(200).json({ success: true, message: 'Pago de comisión registrado', data: result })
     } catch (error) { next(error) }
   })
 
   // Subir comprobantes de un pago de comisión (admin, gerente)
-  router.post('/contract/:contractId/payments/:movementId/vouchers', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+  router.post('/contract/:contractId/sellers/:sellerId/payments/:movementId/vouchers', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
-      const { contractId, movementId } = req.params
+      const { contractId, sellerId, movementId } = req.params
       const { default: uploadCommissionFiles } = await import('./../configurations/multer-commissions.js')
-      const upload = uploadCommissionFiles(contractId)
+      const upload = uploadCommissionFiles(contractId, sellerId)
 
       upload.array('vouchers', 5)(req, res, async (err) => {
         if (err) {
@@ -68,8 +83,8 @@ const commissionsRouter = (io) => {
         }
 
         try {
-          const result = await commissions.addVoucherToMovement(contractId, movementId, req.files)
-          io.emit('commission_voucher_added', { contractId, message: 'Comprobante de comisión agregado' })
+          const result = await commissions.addVoucherToMovement(contractId, sellerId, movementId, req.files)
+          io.emit('commission_voucher_added', { contractId, sellerId, message: 'Comprobante de comisión agregado' })
           res.status(200).json({
             success: true,
             message: `${req.files.length} comprobante(s) subido(s)`,
@@ -85,10 +100,10 @@ const commissionsRouter = (io) => {
   })
 
   // Eliminar un comprobante de un pago de comisión (admin, gerente)
-  router.delete('/contract/:contractId/payments/:movementId/vouchers/:fileName', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+  router.delete('/contract/:contractId/sellers/:sellerId/payments/:movementId/vouchers/:fileName', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
-      const { contractId, movementId, fileName } = req.params
-      const result = await commissions.removeVoucherFromMovement(contractId, movementId, fileName)
+      const { contractId, sellerId, movementId, fileName } = req.params
+      const result = await commissions.removeVoucherFromMovement(contractId, sellerId, movementId, fileName)
       res.status(200).json({ success: true, message: 'Comprobante eliminado', data: result })
     } catch (error) { next(error) }
   })

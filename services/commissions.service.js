@@ -9,77 +9,57 @@ class Commissions {
     this.collection = 'commissions'
   }
 
-  async assign(contractId, { percentage, notes, assignedBy } = {}) {
+  validateAmountAndDescription({ amount, description } = {}) {
+    const value = Number(amount)
+    if (isNaN(value) || value <= 0) {
+      throw Boom.badData('El monto de la comisión debe ser un número mayor a 0')
+    }
+    if (!description || !description.trim()) {
+      throw Boom.badData('La descripción de la comisión es requerida')
+    }
+    return { amount: value, description: description.trim() }
+  }
+
+  async addSeller(contractId, { sellerId, amount, description } = {}, actor) {
     try {
       if (!ObjectId.isValid(contractId)) throw Boom.badRequest('ID de contrato no válido')
+      if (!ObjectId.isValid(sellerId)) throw Boom.badRequest('ID de vendedor no válido')
 
       const contract = await db.collection('contracts').findOne({ _id: new ObjectId(contractId) })
       if (!contract) throw Boom.notFound('Contrato no encontrado')
-
-      if (!contract.sellerId) {
-        throw Boom.badRequest('El contrato no tiene un vendedor asignado')
-      }
 
       if (LOCKED_STATUSES.includes(contract.status)) {
         throw Boom.forbidden(`No se puede asignar comisión: el contrato ya está en estado "${contract.status}"`)
       }
 
-      const pct = Number(percentage)
-      if (isNaN(pct) || pct < 0 || pct > 100) {
-        throw Boom.badData('El porcentaje de comisión debe ser un número entre 0 y 100')
-      }
+      const seller = await db.collection('users').findOne({ _id: new ObjectId(sellerId), role: 'vendedor' })
+      if (!seller) throw Boom.badData('El vendedor seleccionado no existe o no tiene rol de vendedor')
 
-      const baseAmount = Number(contract.salePrice) || 0
-      const commissionAmount = Math.round(baseAmount * pct / 100 * 100) / 100
+      const existing = await db.collection(this.collection).findOne({ contractId, sellerId })
+      if (existing) throw Boom.conflict('Este vendedor ya tiene una comisión asignada en este contrato')
+
+      const { amount: value, description: desc } = this.validateAmountAndDescription({ amount, description })
       const now = new Date()
 
-      const existing = await db.collection(this.collection).findOne({ contractId })
-
       const historyEntry = {
-        percentage: pct,
-        baseAmount,
-        commissionAmount,
-        notes: notes || null,
+        amount: value,
+        description: desc,
         changedAt: now,
-        changedBy: assignedBy || null
-      }
-
-      if (existing) {
-        const paidAmount = existing.paidAmount || 0
-        const balance = Math.max(commissionAmount - paidAmount, 0)
-        const status = balance <= 0 && commissionAmount > 0 ? 'pagado' : (paidAmount > 0 ? 'parcial' : 'pendiente')
-
-        await db.collection(this.collection).updateOne(
-          { _id: existing._id },
-          {
-            $set: {
-              percentage: pct,
-              baseAmount,
-              commissionAmount,
-              balance,
-              status,
-              sellerId: contract.sellerId,
-              updatedAt: now
-            },
-            $push: { history: historyEntry }
-          }
-        )
-
-        return await db.collection(this.collection).findOne({ _id: existing._id })
+        changedBy: actor || null
       }
 
       const commission = {
         contractId,
-        sellerId: contract.sellerId,
+        sellerId,
         projectId: contract.projectId,
         contractNumber: contract.contractNumber,
         buyerName: contract.buyerName,
         unitIdentifier: contract.unitIdentifier,
-        percentage: pct,
-        baseAmount,
-        commissionAmount,
+        sellerName: seller.name,
+        amount: value,
+        description: desc,
         paidAmount: 0,
-        balance: commissionAmount,
+        balance: value,
         status: 'pendiente',
         history: [historyEntry],
         movements: [],
@@ -95,20 +75,89 @@ class Commissions {
     }
   }
 
-  async getByContract(contractId) {
+  async updateSeller(contractId, sellerId, { amount, description } = {}, actor) {
     try {
-      const commission = await db.collection(this.collection).findOne({ contractId })
-      return commission || null
+      if (!ObjectId.isValid(contractId)) throw Boom.badRequest('ID de contrato no válido')
+
+      const contract = await db.collection('contracts').findOne({ _id: new ObjectId(contractId) })
+      if (!contract) throw Boom.notFound('Contrato no encontrado')
+
+      if (LOCKED_STATUSES.includes(contract.status)) {
+        throw Boom.forbidden(`No se puede modificar la comisión: el contrato ya está en estado "${contract.status}"`)
+      }
+
+      const existing = await db.collection(this.collection).findOne({ contractId, sellerId })
+      if (!existing) throw Boom.notFound('No hay comisión asignada a este vendedor en este contrato')
+
+      const { amount: value, description: desc } = this.validateAmountAndDescription({ amount, description })
+      const now = new Date()
+
+      const paidAmount = existing.paidAmount || 0
+      const balance = Math.max(value - paidAmount, 0)
+      const status = balance <= 0 && value > 0 ? 'pagado' : (paidAmount > 0 ? 'parcial' : 'pendiente')
+
+      const historyEntry = {
+        amount: value,
+        description: desc,
+        changedAt: now,
+        changedBy: actor || null
+      }
+
+      await db.collection(this.collection).updateOne(
+        { _id: existing._id },
+        {
+          $set: {
+            amount: value,
+            description: desc,
+            balance,
+            status,
+            updatedAt: now
+          },
+          $push: { history: historyEntry }
+        }
+      )
+
+      return await db.collection(this.collection).findOne({ _id: existing._id })
     } catch (error) {
       if (Boom.isBoom(error)) throw error
-      throw Boom.badImplementation('Error al obtener la comisión', error)
+      throw Boom.badImplementation('Error al actualizar la comisión', error)
     }
   }
 
-  async registerPayment(contractId, { amount, paymentMethod, reference, notes, paymentDate, registeredBy } = {}) {
+  async removeSeller(contractId, sellerId) {
     try {
-      const commission = await db.collection(this.collection).findOne({ contractId })
-      if (!commission) throw Boom.notFound('No hay comisión asignada para este contrato')
+      const existing = await db.collection(this.collection).findOne({ contractId, sellerId })
+      if (!existing) throw Boom.notFound('No hay comisión asignada a este vendedor en este contrato')
+
+      if ((existing.paidAmount || 0) > 0) {
+        throw Boom.forbidden('No se puede quitar a este vendedor: ya tiene pagos de comisión registrados')
+      }
+
+      await db.collection(this.collection).deleteOne({ _id: existing._id })
+      return { removed: true, sellerId }
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al quitar la comisión del vendedor', error)
+    }
+  }
+
+  async getByContract(contractId) {
+    try {
+      const commissions = await db.collection(this.collection)
+        .find({ contractId })
+        .sort({ createdAt: 1 })
+        .toArray()
+      return commissions
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al obtener las comisiones', error)
+    }
+  }
+
+  async registerPayment(contractId, sellerId, { amount, paymentMethod, reference, notes, paymentDate, registeredBy } = {}) {
+    try {
+      const commission = await db.collection(this.collection).findOne({ contractId, sellerId })
+      if (!commission) throw Boom.notFound('No hay comisión asignada para este vendedor en este contrato')
 
       const value = Number(amount)
       if (!value || value <= 0) throw Boom.badData('El monto debe ser mayor a 0')
@@ -118,7 +167,7 @@ class Commissions {
 
       const now = new Date()
       const newPaidAmount = commission.paidAmount + value
-      const newBalance = Math.max(commission.commissionAmount - newPaidAmount, 0)
+      const newBalance = Math.max(commission.amount - newPaidAmount, 0)
       const newStatus = newBalance <= 0 ? 'pagado' : 'parcial'
 
       const movement = {
@@ -154,11 +203,11 @@ class Commissions {
     }
   }
 
-  async addVoucherToMovement(contractId, movementId, files) {
+  async addVoucherToMovement(contractId, sellerId, movementId, files) {
     try {
       if (!ObjectId.isValid(movementId)) throw Boom.badRequest('ID de movimiento no válido')
 
-      const commission = await db.collection(this.collection).findOne({ contractId, 'movements._id': new ObjectId(movementId) })
+      const commission = await db.collection(this.collection).findOne({ contractId, sellerId, 'movements._id': new ObjectId(movementId) })
       if (!commission) throw Boom.notFound('Movimiento de pago de comisión no encontrado')
 
       const vouchers = files.map(file => ({
@@ -171,7 +220,7 @@ class Commissions {
       }))
 
       await db.collection(this.collection).updateOne(
-        { contractId, 'movements._id': new ObjectId(movementId) },
+        { contractId, sellerId, 'movements._id': new ObjectId(movementId) },
         {
           $push: { 'movements.$.vouchers': { $each: vouchers } },
           $set: { updatedAt: new Date() }
@@ -185,19 +234,19 @@ class Commissions {
     }
   }
 
-  async removeVoucherFromMovement(contractId, movementId, fileName) {
+  async removeVoucherFromMovement(contractId, sellerId, movementId, fileName) {
     try {
       if (!ObjectId.isValid(movementId)) throw Boom.badRequest('ID de movimiento no válido')
 
       await db.collection(this.collection).updateOne(
-        { contractId, 'movements._id': new ObjectId(movementId) },
+        { contractId, sellerId, 'movements._id': new ObjectId(movementId) },
         {
           $pull: { 'movements.$.vouchers': { fileName } },
           $set: { updatedAt: new Date() }
         }
       )
 
-      const filePath = `uploads/commissions/${contractId}/${fileName}`
+      const filePath = `uploads/commissions/${contractId}/${sellerId}/${fileName}`
       const fs = await import('fs')
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath)
@@ -231,7 +280,7 @@ class Commissions {
           $group: {
             _id: null,
             contractsCount: { $sum: 1 },
-            totalAssigned: { $sum: '$commissionAmount' },
+            totalAssigned: { $sum: '$amount' },
             totalPaid: { $sum: '$paidAmount' },
             totalPending: { $sum: '$balance' }
           }
@@ -253,7 +302,7 @@ class Commissions {
           $group: {
             _id: null,
             contractsCount: { $sum: 1 },
-            totalAssigned: { $sum: '$commissionAmount' },
+            totalAssigned: { $sum: '$amount' },
             totalPaid: { $sum: '$paidAmount' },
             totalPending: { $sum: '$balance' }
           }

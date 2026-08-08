@@ -221,9 +221,9 @@ class Contracts {
         )
       }
 
-      const commission = await db.collection('commissions').findOne({ contractId: id })
+      const commissions = await db.collection('commissions').find({ contractId: id }).sort({ createdAt: 1 }).toArray()
 
-      return { ...contract, buyer, unit, project, seller, commission: commission || null }
+      return { ...contract, buyer, unit, project, seller, commissions }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al obtener el contrato', error)
