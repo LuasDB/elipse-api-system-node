@@ -63,6 +63,9 @@ class Contracts {
 
       const unit = await db.collection('units').findOne({ _id: new ObjectId(unitId) })
       if (!unit) throw Boom.notFound('Unidad no encontrada')
+      if (unit.status !== 'disponible') {
+        throw Boom.conflict(`La unidad "${unit.identifier}" no está disponible (estado actual: ${unit.status}). No se puede crear otro contrato sobre ella.`)
+      }
 
       // Validar tipo de cambio
       const exchangeRate = Number(data.exchangeRate)
