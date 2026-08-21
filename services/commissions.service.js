@@ -1,12 +1,14 @@
 import { ObjectId } from 'mongodb'
 import { db } from './../db/mongoClient.js'
 import Boom from '@hapi/boom'
+import AuditLog from './auditLog.service.js'
 
 const LOCKED_STATUSES = ['entregado', 'cancelado']
 
 class Commissions {
   constructor() {
     this.collection = 'commissions'
+    this.auditLog = new AuditLog()
   }
 
   validateAmountAndDescription({ amount, description } = {}) {
@@ -200,6 +202,113 @@ class Commissions {
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al registrar el pago de comisión', error)
+    }
+  }
+
+  async updateMovement(contractId, sellerId, movementId, updates = {}, actor) {
+    try {
+      if (!ObjectId.isValid(movementId)) throw Boom.badRequest('ID de movimiento no válido')
+
+      const commission = await db.collection(this.collection).findOne({ contractId, sellerId })
+      if (!commission) throw Boom.notFound('No hay comisión asignada para este vendedor en este contrato')
+
+      const movement = (commission.movements || []).find(m => String(m._id) === String(movementId))
+      if (!movement) throw Boom.notFound('Movimiento de pago de comisión no encontrado')
+
+      const newAmount = updates.amount !== undefined ? Number(updates.amount) : movement.amount
+      if (!newAmount || newAmount <= 0) throw Boom.badData('El monto debe ser mayor a 0')
+
+      const otherPaid = commission.paidAmount - movement.amount
+      if (newAmount + otherPaid > commission.amount) {
+        throw Boom.badData('El monto excede el saldo pendiente de comisión')
+      }
+
+      const now = new Date()
+      const newPaidAmount = otherPaid + newAmount
+      const newBalance = Math.max(commission.amount - newPaidAmount, 0)
+      const newStatus = newBalance <= 0 && newPaidAmount > 0 ? 'pagado' : (newPaidAmount > 0 ? 'parcial' : 'pendiente')
+
+      await db.collection(this.collection).updateOne(
+        { _id: commission._id, 'movements._id': new ObjectId(movementId) },
+        {
+          $set: {
+            'movements.$.amount': newAmount,
+            'movements.$.paymentMethod': updates.paymentMethod ?? movement.paymentMethod,
+            'movements.$.reference': updates.reference ?? movement.reference,
+            'movements.$.notes': updates.notes ?? movement.notes,
+            'movements.$.paymentDate': updates.paymentDate ? new Date(updates.paymentDate) : movement.paymentDate,
+            'movements.$.editedAt': now,
+            'movements.$.editedBy': actor?.name || actor?.email || null,
+            paidAmount: newPaidAmount,
+            balance: newBalance,
+            status: newStatus,
+            updatedAt: now
+          }
+        }
+      )
+
+      await this.auditLog.record({
+        entity: 'commission',
+        entityId: commission._id,
+        action: 'movement_updated',
+        userId: actor?._id || actor?.id,
+        userName: actor?.name || actor?.email,
+        meta: {
+          movementId,
+          before: { amount: movement.amount, paymentMethod: movement.paymentMethod, reference: movement.reference, notes: movement.notes },
+          after: { amount: newAmount, paymentMethod: updates.paymentMethod ?? movement.paymentMethod, reference: updates.reference ?? movement.reference, notes: updates.notes ?? movement.notes }
+        }
+      })
+
+      return await db.collection(this.collection).findOne({ _id: commission._id })
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al actualizar el pago de comisión', error)
+    }
+  }
+
+  async removeMovement(contractId, sellerId, movementId, actor) {
+    try {
+      if (!ObjectId.isValid(movementId)) throw Boom.badRequest('ID de movimiento no válido')
+
+      const commission = await db.collection(this.collection).findOne({ contractId, sellerId })
+      if (!commission) throw Boom.notFound('No hay comisión asignada para este vendedor en este contrato')
+
+      const movement = (commission.movements || []).find(m => String(m._id) === String(movementId))
+      if (!movement) throw Boom.notFound('Movimiento de pago de comisión no encontrado')
+
+      const now = new Date()
+      const newPaidAmount = Math.max(commission.paidAmount - movement.amount, 0)
+      const newBalance = Math.max(commission.amount - newPaidAmount, 0)
+      const newStatus = newBalance <= 0 && newPaidAmount > 0 ? 'pagado' : (newPaidAmount > 0 ? 'parcial' : 'pendiente')
+
+      await db.collection(this.collection).updateOne(
+        { _id: commission._id },
+        {
+          $pull: { movements: { _id: new ObjectId(movementId) } },
+          $set: { paidAmount: newPaidAmount, balance: newBalance, status: newStatus, updatedAt: now }
+        }
+      )
+
+      const fs = await import('fs')
+      for (const v of (movement.vouchers || [])) {
+        const filePath = `uploads/commissions/${contractId}/${sellerId}/${v.fileName}`
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+      }
+
+      await this.auditLog.record({
+        entity: 'commission',
+        entityId: commission._id,
+        action: 'movement_removed',
+        userId: actor?._id || actor?.id,
+        userName: actor?.name || actor?.email,
+        meta: { movementId, amount: movement.amount }
+      })
+
+      return await db.collection(this.collection).findOne({ _id: commission._id })
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al eliminar el pago de comisión', error)
     }
   }
 

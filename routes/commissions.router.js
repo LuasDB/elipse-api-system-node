@@ -108,6 +108,26 @@ const commissionsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
+  // Modificar un pago de comisión ya registrado (solo admin)
+  router.patch('/contract/:contractId/sellers/:sellerId/payments/:movementId', authenticate, authorize('admin'), async (req, res, next) => {
+    try {
+      const { contractId, sellerId, movementId } = req.params
+      const result = await commissions.updateMovement(contractId, sellerId, movementId, req.body, req.user)
+      io.emit('commission_payment_registered', { contractId, sellerId, message: 'Pago de comisión actualizado' })
+      res.status(200).json({ success: true, message: 'Pago de comisión actualizado', data: result })
+    } catch (error) { next(error) }
+  })
+
+  // Eliminar un pago de comisión ya registrado (solo admin)
+  router.delete('/contract/:contractId/sellers/:sellerId/payments/:movementId', authenticate, authorize('admin'), async (req, res, next) => {
+    try {
+      const { contractId, sellerId, movementId } = req.params
+      const result = await commissions.removeMovement(contractId, sellerId, movementId, req.user)
+      io.emit('commission_payment_registered', { contractId, sellerId, message: 'Pago de comisión eliminado' })
+      res.status(200).json({ success: true, message: 'Pago de comisión eliminado', data: result })
+    } catch (error) { next(error) }
+  })
+
   // Listar comisiones de un vendedor
   router.get('/seller/:sellerId', authenticate, async (req, res, next) => {
     try {

@@ -116,6 +116,23 @@ const paymentsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
+  // Editar un pago (montos, fechas, estatus, etc.) — solo admin
+  router.patch('/:id', authenticate, authorize('admin'), async (req, res, next) => {
+    try {
+      const result = await payments.updatePayment(req.params.id, req.body, req.user)
+      io.emit('payment_updated', { paymentId: req.params.id })
+      res.status(200).json({ success: true, message: 'Pago actualizado', data: result })
+    } catch (error) { next(error) }
+  })
+
+  // Historial de cambios de un pago (edición y comprobantes)
+  router.get('/:id/audit', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+    try {
+      const result = await payments.getAuditLog(req.params.id)
+      res.status(200).json({ success: true, message: 'Historial obtenido', data: result })
+    } catch (error) { next(error) }
+  })
+
   // Eliminar un pago
   router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {
     try {
@@ -152,7 +169,7 @@ router.post('/:id/vouchers', authenticate, authorize('admin', 'gerente', 'cobran
       }
 
       try {
-        const result = await payments.addVouchers(id, req.files)
+        const result = await payments.addVouchers(id, req.files, req.user)
         io.emit('payment_voucher_added', { message: 'Comprobante agregado' })
         res.status(200).json({
           success: true,
@@ -172,7 +189,7 @@ router.post('/:id/vouchers', authenticate, authorize('admin', 'gerente', 'cobran
 router.delete('/:id/vouchers/:fileName', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
   try {
     const { id, fileName } = req.params
-    const result = await payments.removeVoucher(id, fileName)
+    const result = await payments.removeVoucher(id, fileName, req.user)
     res.status(200).json({ success: true, message: 'Comprobante eliminado', data: result })
   } catch (error) { next(error) }
 })

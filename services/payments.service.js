@@ -1,10 +1,18 @@
 import { ObjectId } from 'mongodb'
 import { db } from './../db/mongoClient.js'
 import Boom from '@hapi/boom'
+import AuditLog from './auditLog.service.js'
+
+// Campos de un pago que el admin puede editar directamente (fuera del flujo normal de registro/hitos)
+const EDITABLE_PAYMENT_FIELDS = [
+  'concept', 'expectedAmount', 'paidAmount', 'balance', 'dueDate', 'paidDate',
+  'status', 'paymentMethod', 'reference', 'notes'
+]
 
 class Payments {
   constructor() {
     this.collection = 'payments'
+    this.auditLog = new AuditLog()
   }
 
   // Genera calendario completo de pagos al crear contrato
@@ -303,6 +311,77 @@ class Payments {
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al registrar el pago', error)
+    }
+  }
+
+  // Edición directa de un pago por parte de un administrador (fuera del flujo normal
+  // de registro/hitos). Se usa para corregir montos, fechas o datos capturados por error.
+  async updatePayment(id, updates, editor) {
+    try {
+      if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
+
+      const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+      if (!payment) throw Boom.notFound('Pago no encontrado')
+
+      const dataToUpdate = {}
+      const changes = []
+
+      for (const field of EDITABLE_PAYMENT_FIELDS) {
+        if (updates[field] === undefined) continue
+
+        let value = updates[field]
+        if (field === 'dueDate' || field === 'paidDate') {
+          value = value ? new Date(value) : null
+        }
+        if (field === 'expectedAmount' || field === 'paidAmount' || field === 'balance') {
+          value = Number(value)
+          if (Number.isNaN(value)) throw Boom.badData(`El campo ${field} debe ser numérico`)
+        }
+
+        const previous = payment[field] ?? null
+        const normalizedPrevious = previous instanceof Date ? previous.toISOString() : previous
+        const normalizedValue = value instanceof Date ? value.toISOString() : value
+
+        if (normalizedPrevious !== normalizedValue) {
+          changes.push({ field, from: normalizedPrevious, to: normalizedValue })
+          dataToUpdate[field] = value
+        }
+      }
+
+      if (changes.length === 0) {
+        return { updated: false, message: 'No hay cambios que aplicar', payment }
+      }
+
+      dataToUpdate.updatedAt = new Date()
+
+      await db.collection(this.collection).updateOne(
+        { _id: new ObjectId(id) },
+        { $set: dataToUpdate }
+      )
+
+      await this.auditLog.record({
+        entity: 'payment',
+        entityId: id,
+        action: 'payment_updated',
+        userId: editor?._id || editor?.id,
+        userName: editor?.name || editor?.email,
+        changes
+      })
+
+      return await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al editar el pago', error)
+    }
+  }
+
+  async getAuditLog(id) {
+    try {
+      if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
+      return await this.auditLog.getByEntity('payment', id)
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al obtener el historial del pago', error)
     }
   }
 
@@ -663,7 +742,7 @@ class Payments {
     }
   }
 
-  async addVouchers(id, files) {
+  async addVouchers(id, files, uploader) {
   try {
     if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
 
@@ -676,7 +755,8 @@ class Payments {
       path: file.path,
       size: file.size,
       mimetype: file.mimetype,
-      uploadedAt: new Date()
+      uploadedAt: new Date(),
+      uploadedBy: uploader?.name || uploader?.email || null
     }))
 
     await db.collection(this.collection).updateOne(
@@ -687,6 +767,15 @@ class Payments {
       }
     )
 
+    await this.auditLog.record({
+      entity: 'payment',
+      entityId: id,
+      action: 'voucher_added',
+      userId: uploader?._id || uploader?.id,
+      userName: uploader?.name || uploader?.email,
+      meta: { files: vouchers.map(v => v.originalName) }
+    })
+
     return { added: vouchers.length, vouchers }
   } catch (error) {
     if (Boom.isBoom(error)) throw error
@@ -694,7 +783,7 @@ class Payments {
   }
 }
 
-async removeVoucher(id, fileName) {
+async removeVoucher(id, fileName, remover) {
   try {
     if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
 
@@ -711,6 +800,15 @@ async removeVoucher(id, fileName) {
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath)
     }
+
+    await this.auditLog.record({
+      entity: 'payment',
+      entityId: id,
+      action: 'voucher_removed',
+      userId: remover?._id || remover?.id,
+      userName: remover?.name || remover?.email,
+      meta: { fileName }
+    })
 
     return { removed: fileName }
   } catch (error) {

@@ -2,10 +2,81 @@ import { ObjectId } from 'mongodb'
 import { db } from './../db/mongoClient.js'
 import Boom from '@hapi/boom'
 import Commissions from './commissions.service.js'
+import Attachments from './attachments.service.js'
+import AuditLog from './auditLog.service.js'
+
+const RELATED_TO = 'sellers'
 
 class Sellers {
   constructor() {
     this.commissions = new Commissions()
+    this.attachments = new Attachments()
+    this.auditLog = new AuditLog()
+  }
+
+  async _assertExists(sellerId) {
+    if (!ObjectId.isValid(sellerId)) throw Boom.badRequest('El ID del vendedor no es válido')
+    const seller = await db.collection('users').findOne({ _id: new ObjectId(sellerId), role: 'vendedor' })
+    if (!seller) throw Boom.notFound('Vendedor no encontrado')
+    return seller
+  }
+
+  async getAttachments(sellerId) {
+    await this._assertExists(sellerId)
+    return this.attachments.getByRelatedId(RELATED_TO, sellerId)
+  }
+
+  async addAttachments(sellerId, files, uploader) {
+    await this._assertExists(sellerId)
+
+    const uploadedBy = uploader?._id || uploader?.id
+    const results = []
+    for (const file of files) {
+      const attachment = await this.attachments.create({
+        file,
+        uploadedBy,
+        relatedTo: RELATED_TO,
+        relatedId: sellerId
+      })
+      results.push(attachment)
+    }
+
+    await this.auditLog.record({
+      entity: 'seller',
+      entityId: sellerId,
+      action: 'attachment_added',
+      userId: uploadedBy,
+      userName: uploader?.name || uploader?.email,
+      meta: { files: results.map(r => r.filename) }
+    })
+
+    return results
+  }
+
+  async deleteAttachment(sellerId, attachmentId, remover) {
+    await this._assertExists(sellerId)
+    const attachment = await this.attachments.getById(attachmentId)
+    if (String(attachment.relatedId) !== String(sellerId) || attachment.relatedTo !== RELATED_TO) {
+      throw Boom.notFound('El adjunto no pertenece a este vendedor')
+    }
+
+    const result = await this.attachments.deleteById(attachmentId)
+
+    await this.auditLog.record({
+      entity: 'seller',
+      entityId: sellerId,
+      action: 'attachment_deleted',
+      userId: remover?._id || remover?.id,
+      userName: remover?.name || remover?.email,
+      meta: { filename: attachment.filename }
+    })
+
+    return result
+  }
+
+  async getAuditLog(sellerId) {
+    await this._assertExists(sellerId)
+    return this.auditLog.getByEntity('seller', sellerId)
   }
 
   async _getContractStats(sellerId) {
