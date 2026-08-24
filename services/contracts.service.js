@@ -275,12 +275,14 @@ class Contracts {
         dataToUpdate.milestonesTemplate !== undefined &&
         JSON.stringify(dataToUpdate.milestonesTemplate) !== JSON.stringify(existing.milestonesTemplate || [])
 
-      // Detectar cambios que requieren regeneración del calendario
-      const triggersRegeneration = [
-        'modality', 'salePrice', 'downPayment', 'monthlyPayment',
-        'totalPayments', 'milestonesTemplate', 'signDate', 'promiseDate'
-      ]
-      const shouldRegenerate = triggersRegeneration.some(field => field in dataToUpdate)
+      // Detectar cambios que requieren regeneración del calendario.
+      // OJO: comparar el VALOR contra `existing`, no solo si la llave viene en el payload —
+      // el formulario de edición reenvía siempre todos los campos (incluidos signDate/promiseDate
+      // sin cambios), así que solo checar presencia disparaba regeneración en cualquier edición.
+      const valueChanged = (field) =>
+        field in dataToUpdate && String(dataToUpdate[field] ?? '') !== String(existing[field] ?? '')
+      const triggersRegeneration = ['salePrice', 'downPayment', 'monthlyPayment', 'totalPayments', 'signDate', 'promiseDate']
+      const shouldRegenerate = modalityChanged || milestonesChanged || triggersRegeneration.some(valueChanged)
 
       // Aplicar update
       await db.collection(this.collection).updateOne(
@@ -326,6 +328,11 @@ class Contracts {
           { $set: { status: 'disponible', buyerId: null, updatedAt: new Date() } }
         )
       }
+
+      // Limpiar datos dependientes (antes no se hacía: dejaba pagos/comisiones huérfanos
+      // que inflaban conteos globales como el del Dashboard).
+      await db.collection('payments').deleteMany({ contractId: id })
+      await db.collection('commissions').deleteMany({ contractId: id })
 
       const result = await db.collection(this.collection).deleteOne({ _id: new ObjectId(id) })
       return result

@@ -220,7 +220,7 @@ class Payments {
       const bulkOps = []
 
       payments.forEach(p => {
-        if (p.status === 'pendiente' && new Date(p.dueDate) < now) {
+        if ((p.status === 'pendiente' || p.status === 'parcial') && new Date(p.dueDate) < now) {
           p.status = 'vencido'
           bulkOps.push({
             updateOne: {
@@ -412,9 +412,13 @@ class Payments {
         summary.totalBalance += p.balance
 
         if (p.status === 'pagado') summary.paidCount++
-        else if (p.status === 'vencido') summary.overdueCount++
         else if (p.status === 'parcial') summary.partialCount++
         else summary.pendingCount++
+
+        // "Vencido" se calcula en vivo por fecha, no por el campo `status` guardado:
+        // ese campo solo se refresca de forma perezosa (ver bloque de arriba) y no cubre
+        // pagos 'parcial', así que confiar en él subcuenta los vencidos reales.
+        if (p.status !== 'pagado' && new Date(p.dueDate) < now) summary.overdueCount++
       })
 
       // Siguiente pago pendiente
@@ -958,8 +962,15 @@ async removeVoucher(id, fileName, remover) {
             paidCount: {
               $size: { $filter: { input: '$payments', cond: { $eq: ['$$this.status', 'pagado'] } } }
             },
+            // Igual que en getContractSummary: se calcula en vivo por fecha, no por el
+            // campo `status` guardado (ese solo se refresca al abrir el contrato y no cubre 'parcial').
             overdueCount: {
-              $size: { $filter: { input: '$payments', cond: { $eq: ['$$this.status', 'vencido'] } } }
+              $size: {
+                $filter: {
+                  input: '$payments',
+                  cond: { $and: [{ $ne: ['$$this.status', 'pagado'] }, { $lt: ['$$this.dueDate', '$$NOW'] }] }
+                }
+              }
             }
           }
         },
