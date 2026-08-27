@@ -1,6 +1,7 @@
 import Boom from "@hapi/boom"
 import jwt from 'jsonwebtoken'
 import config from "../config.js"
+import { buildAuditContext } from "./auditContext.js"
 
 const authenticate = (req,res,next)=>{
   try {
@@ -13,6 +14,7 @@ const authenticate = (req,res,next)=>{
     const decoded = jwt.verify(token, config.jwtSecret)
 
     req.user = decoded
+    req.audit = buildAuditContext(req)
     next()
 
   } catch (error) {

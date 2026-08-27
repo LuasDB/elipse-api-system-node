@@ -1,10 +1,13 @@
 import { ObjectId } from 'mongodb'
 import { db } from './../db/mongoClient.js'
 import Boom from '@hapi/boom'
+import AuditLog from './auditLog.service.js'
+import { diff } from '../utils/audit.util.js'
 
 class Contracts {
   constructor() {
     this.collection = 'contracts'
+    this.auditLog = new AuditLog()
   }
 
   
@@ -49,7 +52,7 @@ class Contracts {
     return map[contractStatus] || null
   }
 
-  async create(data) {
+  async create(data, context) {
     try {
       const { projectId, unitId, buyerId, sellerId, modality } = data
 
@@ -124,10 +127,20 @@ class Contracts {
       try {
         const { default: PaymentsService } = await import('./payments.service.js')
         const paymentsService = new PaymentsService()
-        await paymentsService.generateSchedule(result.insertedId.toString())
+        await paymentsService.generateSchedule(result.insertedId.toString(), context)
       } catch (genErr) {
         console.error('Error al auto-generar calendario:', genErr)
       }
+
+      await this.auditLog.record({
+        entity: 'contract',
+        entityId: result.insertedId,
+        entityLabel: contract.contractNumber,
+        action: 'created',
+        actor: context?.actor,
+        snapshot: { _id: result.insertedId, ...contract },
+        meta: context ? { ip: context.ip } : null
+      })
 
       return { _id: result.insertedId, ...contract }
     } catch (error) {
@@ -233,7 +246,7 @@ class Contracts {
     }
   }
 
-  async updateOneById(id, newData) {
+  async updateOneById(id, newData, context) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('ID no válido')
 
@@ -290,13 +303,26 @@ class Contracts {
         { $set: { ...dataToUpdate, updatedAt: new Date() } }
       )
 
+      const changes = diff(existing, dataToUpdate)
+      if (changes.length) {
+        await this.auditLog.record({
+          entity: 'contract',
+          entityId: id,
+          entityLabel: existing.contractNumber,
+          action: 'updated',
+          actor: context?.actor,
+          changes,
+          meta: context ? { ip: context.ip } : null
+        })
+      }
+
       // Regenerar calendario si aplica (preservando pagos cobrados)
       let regenerationResult = null
       if (shouldRegenerate) {
         try {
           const { default: PaymentsService } = await import('./payments.service.js')
           const paymentsService = new PaymentsService()
-          regenerationResult = await paymentsService.regenerateSchedulePreservingPaid(id)
+          regenerationResult = await paymentsService.regenerateSchedulePreservingPaid(id, context)
         } catch (regenErr) {
           console.error('Error al regenerar calendario:', regenErr)
         }
@@ -314,7 +340,7 @@ class Contracts {
     }
   }
 
-  async deleteOneById(id) {
+  async deleteOneById(id, context) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID del contrato no es válido')
 
@@ -331,10 +357,31 @@ class Contracts {
 
       // Limpiar datos dependientes (antes no se hacía: dejaba pagos/comisiones huérfanos
       // que inflaban conteos globales como el del Dashboard).
+      const removedPayments = await db.collection('payments').find({ contractId: id }).toArray()
+      const removedCommissions = await db.collection('commissions').find({ contractId: id }).toArray()
       await db.collection('payments').deleteMany({ contractId: id })
       await db.collection('commissions').deleteMany({ contractId: id })
 
       const result = await db.collection(this.collection).deleteOne({ _id: new ObjectId(id) })
+
+      await this.auditLog.record({
+        entity: 'contract',
+        entityId: id,
+        entityLabel: contract.contractNumber,
+        action: 'deleted',
+        actor: context?.actor,
+        snapshot: contract,
+        meta: {
+          ip: context?.ip || null,
+          cascade: {
+            payments: removedPayments.length,
+            commissions: removedCommissions.length
+          },
+          removedPayments,
+          removedCommissions
+        }
+      })
+
       return result
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -342,7 +389,7 @@ class Contracts {
     }
   }
 
-  async addFiles(id, files) {
+  async addFiles(id, files, context) {
   try {
     if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID del contrato no es válido')
 
@@ -366,6 +413,15 @@ class Contracts {
       }
     )
 
+    await this.auditLog.record({
+      entity: 'contract',
+      entityId: id,
+      entityLabel: contract.contractNumber,
+      action: 'file_added',
+      actor: context?.actor,
+      meta: { ip: context?.ip || null, files: fileRecords.map(f => f.originalName) }
+    })
+
     return { filesAdded: fileRecords.length, files: fileRecords }
   } catch (error) {
     if (Boom.isBoom(error)) throw error
@@ -373,9 +429,11 @@ class Contracts {
   }
 }
 
-async removeFile(id, fileName) {
+async removeFile(id, fileName, context) {
   try {
     if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID del contrato no es válido')
+
+    const contract = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
 
     const result = await db.collection(this.collection).updateOne(
       { _id: new ObjectId(id) },
@@ -390,7 +448,16 @@ async removeFile(id, fileName) {
     const fs = await import('fs')
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath)
-    } 
+    }
+
+    await this.auditLog.record({
+      entity: 'contract',
+      entityId: id,
+      entityLabel: contract?.contractNumber,
+      action: 'file_removed',
+      actor: context?.actor,
+      meta: { ip: context?.ip || null, fileName }
+    })
 
     return result
   } catch (error) {

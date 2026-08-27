@@ -26,10 +26,10 @@ class Sellers {
     return this.attachments.getByRelatedId(RELATED_TO, sellerId)
   }
 
-  async addAttachments(sellerId, files, uploader) {
-    await this._assertExists(sellerId)
+  async addAttachments(sellerId, files, context) {
+    const seller = await this._assertExists(sellerId)
 
-    const uploadedBy = uploader?._id || uploader?.id
+    const uploadedBy = context?.actor?.userId
     const results = []
     for (const file of files) {
       const attachment = await this.attachments.create({
@@ -44,17 +44,17 @@ class Sellers {
     await this.auditLog.record({
       entity: 'seller',
       entityId: sellerId,
+      entityLabel: seller.name,
       action: 'attachment_added',
-      userId: uploadedBy,
-      userName: uploader?.name || uploader?.email,
-      meta: { files: results.map(r => r.filename) }
+      actor: context?.actor,
+      meta: { ip: context?.ip || null, files: results.map(r => r.filename) }
     })
 
     return results
   }
 
-  async deleteAttachment(sellerId, attachmentId, remover) {
-    await this._assertExists(sellerId)
+  async deleteAttachment(sellerId, attachmentId, context) {
+    const seller = await this._assertExists(sellerId)
     const attachment = await this.attachments.getById(attachmentId)
     if (String(attachment.relatedId) !== String(sellerId) || attachment.relatedTo !== RELATED_TO) {
       throw Boom.notFound('El adjunto no pertenece a este vendedor')
@@ -65,10 +65,10 @@ class Sellers {
     await this.auditLog.record({
       entity: 'seller',
       entityId: sellerId,
+      entityLabel: seller.name,
       action: 'attachment_deleted',
-      userId: remover?._id || remover?.id,
-      userName: remover?.name || remover?.email,
-      meta: { filename: attachment.filename }
+      actor: context?.actor,
+      meta: { ip: context?.ip || null, filename: attachment.filename }
     })
 
     return result
@@ -76,7 +76,8 @@ class Sellers {
 
   async getAuditLog(sellerId) {
     await this._assertExists(sellerId)
-    return this.auditLog.getByEntity('seller', sellerId)
+    const { items } = await this.auditLog.getByEntity('seller', sellerId, { limit: 200 })
+    return items
   }
 
   async _getContractStats(sellerId) {

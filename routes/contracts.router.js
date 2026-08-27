@@ -37,7 +37,7 @@ const contractsRouter = (io) => {
 
   router.post('/', authenticate, authorize('admin', 'gerente', 'vendedor'), async (req, res, next) => {
     try {
-      const result = await contracts.create(req.body)
+      const result = await contracts.create(req.body, req.audit)
       io.emit('contract_created', { message: 'Nuevo contrato registrado', data: result })
       res.status(201).json({ success: true, message: 'Contrato creado', data: result })
     } catch (error) { next(error) }
@@ -45,7 +45,7 @@ const contractsRouter = (io) => {
 
   router.patch('/:id', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
-      const result = await contracts.updateOneById(req.params.id, req.body)
+      const result = await contracts.updateOneById(req.params.id, req.body, req.audit)
       io.emit('contract_updated', { message: 'Contrato actualizado' })
       res.status(200).json({ success: true, message: 'Contrato actualizado', data: result })
     } catch (error) { next(error) }
@@ -53,7 +53,7 @@ const contractsRouter = (io) => {
 
   router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {
     try {
-      const result = await contracts.deleteOneById(req.params.id)
+      const result = await contracts.deleteOneById(req.params.id, req.audit)
       io.emit('contract_deleted', { message: 'Contrato eliminado' })
       res.status(200).json({ success: true, message: 'Contrato eliminado', data: result })
     } catch (error) { next(error) }
@@ -77,7 +77,7 @@ router.post('/:id/files', authenticate, authorize('admin', 'gerente', 'vendedor'
       }
 
       try {
-        const result = await contracts.addFiles(id, req.files)
+        const result = await contracts.addFiles(id, req.files, req.audit)
         io.emit('contract_files_added', { message: 'Archivos agregados al contrato' })
         res.status(200).json({
           success: true,
@@ -97,7 +97,7 @@ router.post('/:id/files', authenticate, authorize('admin', 'gerente', 'vendedor'
 router.delete('/:id/files/:fileName', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
   try {
     const { id, fileName } = req.params
-    const result = await contracts.removeFile(id, fileName)
+    const result = await contracts.removeFile(id, fileName, req.audit)
     res.status(200).json({ success: true, message: 'Archivo eliminado', data: result })
   } catch (error) { next(error) }
 })

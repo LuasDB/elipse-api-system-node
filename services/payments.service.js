@@ -2,6 +2,7 @@ import { ObjectId } from 'mongodb'
 import { db } from './../db/mongoClient.js'
 import Boom from '@hapi/boom'
 import AuditLog from './auditLog.service.js'
+import { diff } from '../utils/audit.util.js'
 
 // Campos de un pago que el admin puede editar directamente (fuera del flujo normal de registro/hitos)
 const EDITABLE_PAYMENT_FIELDS = [
@@ -16,7 +17,7 @@ class Payments {
   }
 
   // Genera calendario completo de pagos al crear contrato
-  async generateSchedule(contractId) {
+  async generateSchedule(contractId, context) {
     try {
       if (!ObjectId.isValid(contractId)) throw Boom.badRequest('ID de contrato no válido')
 
@@ -24,6 +25,7 @@ class Payments {
       if (!contract) throw Boom.notFound('Contrato no encontrado')
 
       // Borrar pagos previos del contrato (regeneración)
+      const previousCount = await db.collection(this.collection).countDocuments({ contractId: contractId.toString() })
       await db.collection(this.collection).deleteMany({ contractId: contractId.toString() })
 
       const payments = []
@@ -152,6 +154,16 @@ class Payments {
       }
 
       const result = await db.collection(this.collection).insertMany(payments)
+
+      await this.auditLog.record({
+        entity: 'contract',
+        entityId: contractId,
+        entityLabel: contract.contractNumber,
+        action: 'schedule_generated',
+        actor: context?.actor,
+        meta: { ip: context?.ip || null, generated: result.insertedCount, replaced: previousCount }
+      })
+
       return { count: result.insertedCount, payments }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -159,7 +171,7 @@ class Payments {
     }
   }
 
-  async regenerateSchedulePreservingPaid(contractId) {
+  async regenerateSchedulePreservingPaid(contractId, context) {
     try {
       if (!ObjectId.isValid(contractId)) throw Boom.badRequest('ID de contrato no válido')
 
@@ -183,13 +195,27 @@ class Payments {
       //     menos los no cobrados que ya borramos. El usuario verá inconsistencia visual
       //     deliberada para forzar revisión manual.)
       if (paidPayments.length === 0) {
-        const result = await this.generateSchedule(contractId)
+        const result = await this.generateSchedule(contractId, context)
         return {
           preserved: 0,
           removed: unpaidIds.length,
           generated: result.count || 0,
           fullRegeneration: true
         }
+      }
+
+      if (unpaidIds.length > 0) {
+        await this.auditLog.record({
+          entity: 'contract',
+          entityId: contractId,
+          action: 'schedule_partially_regenerated',
+          actor: context?.actor,
+          meta: {
+            ip: context?.ip || null,
+            preserved: paidPayments.length,
+            removed: unpaidIds.length
+          }
+        })
       }
 
       // Si hay pagos cobrados, dejamos solo esos en la BD.
@@ -243,7 +269,7 @@ class Payments {
   }
 
   // Registrar un pago (total o parcial)
-  async registerPayment(id, paymentData) {
+  async registerPayment(id, paymentData, context) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
 
@@ -307,6 +333,28 @@ class Payments {
         }
       )
 
+      await this.auditLog.record({
+        entity: 'payment',
+        entityId: id,
+        entityLabel: [payment.concept, payment.unitIdentifier].filter(Boolean).join(' · '),
+        action: 'payment_registered',
+        actor: context?.actor,
+        changes: [
+          { field: 'paidAmount', from: payment.paidAmount, to: newPaidAmount },
+          { field: 'balance', from: payment.balance, to: Math.max(newBalance, 0) },
+          { field: 'status', from: payment.status, to: newStatus }
+        ],
+        meta: {
+          ip: context?.ip || null,
+          contractId: payment.contractId,
+          amount,
+          exchangeRate,
+          mxnEquivalent: movement.mxnEquivalent,
+          paymentMethod: movement.paymentMethod,
+          reference: movement.reference
+        }
+      })
+
       return { ...updateData, movement }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -316,7 +364,7 @@ class Payments {
 
   // Edición directa de un pago por parte de un administrador (fuera del flujo normal
   // de registro/hitos). Se usa para corregir montos, fechas o datos capturados por error.
-  async updatePayment(id, updates, editor) {
+  async updatePayment(id, updates, context) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
 
@@ -362,10 +410,11 @@ class Payments {
       await this.auditLog.record({
         entity: 'payment',
         entityId: id,
+        entityLabel: [payment.concept, payment.unitIdentifier].filter(Boolean).join(' · '),
         action: 'payment_updated',
-        userId: editor?._id || editor?.id,
-        userName: editor?.name || editor?.email,
-        changes
+        actor: context?.actor,
+        changes,
+        meta: { ip: context?.ip || null, contractId: payment.contractId }
       })
 
       return await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
@@ -378,7 +427,8 @@ class Payments {
   async getAuditLog(id) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
-      return await this.auditLog.getByEntity('payment', id)
+      const { items } = await this.auditLog.getByEntity('payment', id, { limit: 200 })
+      return items
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al obtener el historial del pago', error)
@@ -720,7 +770,7 @@ class Payments {
   }
 
   // Eliminar pago individual (solo si no está pagado)
-  async deleteOneById(id) {
+  async deleteOneById(id, context) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('ID no válido')
       const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
@@ -728,6 +778,17 @@ class Payments {
       if (payment.status === 'pagado') throw Boom.conflict('No se puede eliminar un pago ya registrado')
 
       const result = await db.collection(this.collection).deleteOne({ _id: new ObjectId(id) })
+
+      await this.auditLog.record({
+        entity: 'payment',
+        entityId: id,
+        entityLabel: [payment.concept, payment.unitIdentifier].filter(Boolean).join(' · '),
+        action: 'deleted',
+        actor: context?.actor,
+        snapshot: payment,
+        meta: { ip: context?.ip || null, contractId: payment.contractId }
+      })
+
       return result
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -736,9 +797,20 @@ class Payments {
   }
 
   // Eliminar todos los pagos de un contrato
-  async deleteByContract(contractId) {
+  async deleteByContract(contractId, context) {
     try {
+      const removed = await db.collection(this.collection).find({ contractId }).toArray()
       const result = await db.collection(this.collection).deleteMany({ contractId })
+
+      await this.auditLog.record({
+        entity: 'contract',
+        entityId: contractId,
+        action: 'payments_deleted',
+        actor: context?.actor,
+        snapshot: removed,
+        meta: { ip: context?.ip || null, deleted: result.deletedCount }
+      })
+
       return result
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -746,7 +818,7 @@ class Payments {
     }
   }
 
-  async addVouchers(id, files, uploader) {
+  async addVouchers(id, files, context) {
   try {
     if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
 
@@ -760,7 +832,7 @@ class Payments {
       size: file.size,
       mimetype: file.mimetype,
       uploadedAt: new Date(),
-      uploadedBy: uploader?.name || uploader?.email || null
+      uploadedBy: context?.actor?.name || context?.actor?.email || null
     }))
 
     await db.collection(this.collection).updateOne(
@@ -774,10 +846,10 @@ class Payments {
     await this.auditLog.record({
       entity: 'payment',
       entityId: id,
+      entityLabel: [payment.concept, payment.unitIdentifier].filter(Boolean).join(' · '),
       action: 'voucher_added',
-      userId: uploader?._id || uploader?.id,
-      userName: uploader?.name || uploader?.email,
-      meta: { files: vouchers.map(v => v.originalName) }
+      actor: context?.actor,
+      meta: { ip: context?.ip || null, contractId: payment.contractId, files: vouchers.map(v => v.originalName) }
     })
 
     return { added: vouchers.length, vouchers }
@@ -787,9 +859,11 @@ class Payments {
   }
 }
 
-async removeVoucher(id, fileName, remover) {
+async removeVoucher(id, fileName, context) {
   try {
     if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
+
+    const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
 
     await db.collection(this.collection).updateOne(
       { _id: new ObjectId(id) },
@@ -808,10 +882,10 @@ async removeVoucher(id, fileName, remover) {
     await this.auditLog.record({
       entity: 'payment',
       entityId: id,
+      entityLabel: [payment?.concept, payment?.unitIdentifier].filter(Boolean).join(' · '),
       action: 'voucher_removed',
-      userId: remover?._id || remover?.id,
-      userName: remover?.name || remover?.email,
-      meta: { fileName }
+      actor: context?.actor,
+      meta: { ip: context?.ip || null, contractId: payment?.contractId, fileName }
     })
 
     return { removed: fileName }
@@ -822,7 +896,7 @@ async removeVoucher(id, fileName, remover) {
 }
 
 // Marcar hito como completado (Línea 2)
-  async completeMilestone(paymentId, { commitmentDate, notes, completedBy } = {}) {
+  async completeMilestone(paymentId, { commitmentDate, notes, completedBy } = {}, context) {
     try {
       if (!ObjectId.isValid(paymentId)) throw Boom.badRequest('ID de pago no válido')
 
@@ -854,6 +928,19 @@ async removeVoucher(id, fileName, remover) {
         { $set: update }
       )
 
+      await this.auditLog.record({
+        entity: 'payment',
+        entityId: paymentId,
+        entityLabel: [payment.concept, payment.unitIdentifier].filter(Boolean).join(' · '),
+        action: 'milestone_completed',
+        actor: context?.actor,
+        changes: [
+          { field: 'milestoneStatus', from: payment.milestoneStatus || 'pendiente', to: 'completado' },
+          { field: 'commitmentDate', from: payment.commitmentDate || null, to: update.commitmentDate }
+        ],
+        meta: { ip: context?.ip || null, contractId: payment.contractId, notes: notes || null }
+      })
+
       return await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -861,7 +948,7 @@ async removeVoucher(id, fileName, remover) {
     }
   }
 
-  async updateMilestoneCommitment(paymentId, { commitmentDate, notes }) {
+  async updateMilestoneCommitment(paymentId, { commitmentDate, notes }, context) {
     try {
       if (!ObjectId.isValid(paymentId)) throw Boom.badRequest('ID de pago no válido')
 
@@ -884,6 +971,19 @@ async removeVoucher(id, fileName, remover) {
         { $set: set }
       )
 
+      await this.auditLog.record({
+        entity: 'payment',
+        entityId: paymentId,
+        entityLabel: [payment.concept, payment.unitIdentifier].filter(Boolean).join(' · '),
+        action: 'milestone_commitment_updated',
+        actor: context?.actor,
+        changes: diff(
+          { commitmentDate: payment.commitmentDate, milestoneNotes: payment.milestoneNotes },
+          { commitmentDate: set.commitmentDate, ...(notes !== undefined ? { milestoneNotes: notes } : {}) }
+        ),
+        meta: { ip: context?.ip || null, contractId: payment.contractId }
+      })
+
       return await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -892,7 +992,7 @@ async removeVoucher(id, fileName, remover) {
   }
 
   // Revertir hito (en caso de error de captura) - solo si no hay movimientos
-  async uncompleteMilestone(paymentId) {
+  async uncompleteMilestone(paymentId, context) {
     try {
       if (!ObjectId.isValid(paymentId)) throw Boom.badRequest('ID de pago no válido')
 
@@ -918,6 +1018,16 @@ async removeVoucher(id, fileName, remover) {
           }
         }
       )
+
+      await this.auditLog.record({
+        entity: 'payment',
+        entityId: paymentId,
+        entityLabel: [payment.concept, payment.unitIdentifier].filter(Boolean).join(' · '),
+        action: 'milestone_uncompleted',
+        actor: context?.actor,
+        changes: [{ field: 'milestoneStatus', from: 'completado', to: 'pendiente' }],
+        meta: { ip: context?.ip || null, contractId: payment.contractId }
+      })
 
       return await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
     } catch (error) {

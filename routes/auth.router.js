@@ -1,12 +1,15 @@
 import express from 'express'
 import Auth from './../services/auth.service.js'
+import { authenticate, authorize } from './../middlewares/authMiddleware.js'
 
 const router = express.Router()
 const auth = new Auth()
 
-router.post('/register',async(req, res, next)=>{
+// El alta de usuarios se hace desde el panel (módulo Usuarios, solo admin).
+// Se exige sesión para poder registrar en la bitácora QUIÉN crea cada usuario.
+router.post('/register', authenticate, authorize('admin'), async(req, res, next)=>{
   try {
-    const newRegister = await auth.create(req.body)
+    const newRegister = await auth.create(req.body, req.audit)
     if(newRegister){
       res.status(200).json({
         success:true,message:'Creado',data:newRegister

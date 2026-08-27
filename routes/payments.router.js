@@ -68,7 +68,7 @@ const paymentsRouter = (io) => {
   // Generar calendario de pagos para un contrato
   router.post('/generate/:contractId', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
-      const result = await payments.generateSchedule(req.params.contractId)
+      const result = await payments.generateSchedule(req.params.contractId, req.audit)
       io.emit('payments_generated', { message: 'Calendario de pagos generado' })
       res.status(201).json({ success: true, message: `${result.generated} pagos programados`, data: result })
     } catch (error) { next(error) }
@@ -80,7 +80,7 @@ const paymentsRouter = (io) => {
       const result = await payments.registerPayment(req.params.id, {
         ...req.body,
         registeredBy: req.user?.name || req.user?.email
-      })
+      }, req.audit)
       io.emit('payment_registered', { message: 'Pago registrado' })
       res.status(200).json({ success: true, message: 'Pago registrado', data: result })
     } catch (error) { next(error) }
@@ -91,8 +91,8 @@ const paymentsRouter = (io) => {
     try {
       const result = await payments.completeMilestone(req.params.id, {
         ...req.body,
-        completedBy: req.user?.id || req.user?._id || null
-      })
+        completedBy: req.user?.name || req.user?.email || null
+      }, req.audit)
       io.emit('milestone_completed', { paymentId: req.params.id, ...result })
       res.status(200).json({ success: true, message: 'Hito marcado como completado', data: result })
     } catch (error) { next(error) }
@@ -101,7 +101,7 @@ const paymentsRouter = (io) => {
   // [LÍNEA 2] Revertir hito (sólo si no tiene pagos)
   router.patch('/:id/milestone/uncomplete', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
-      const result = await payments.uncompleteMilestone(req.params.id)
+      const result = await payments.uncompleteMilestone(req.params.id, req.audit)
       io.emit('milestone_uncompleted', { paymentId: req.params.id, ...result })
       res.status(200).json({ success: true, message: 'Hito revertido a pendiente', data: result })
     } catch (error) { next(error) }
@@ -110,7 +110,7 @@ const paymentsRouter = (io) => {
   // [LÍNEA 2] Editar fecha compromiso de un hito ya completado
   router.patch('/:id/milestone/commitment', authenticate, async (req, res, next) => {
     try {
-      const result = await payments.updateMilestoneCommitment(req.params.id, req.body)
+      const result = await payments.updateMilestoneCommitment(req.params.id, req.body, req.audit)
       io.emit('milestone_commitment_updated', { paymentId: req.params.id, ...result })
       res.status(200).json({ success: true, message: 'Fecha compromiso actualizada', data: result })
     } catch (error) { next(error) }
@@ -119,14 +119,14 @@ const paymentsRouter = (io) => {
   // Editar un pago (montos, fechas, estatus, etc.) — solo admin
   router.patch('/:id', authenticate, authorize('admin'), async (req, res, next) => {
     try {
-      const result = await payments.updatePayment(req.params.id, req.body, req.user)
+      const result = await payments.updatePayment(req.params.id, req.body, req.audit)
       io.emit('payment_updated', { paymentId: req.params.id })
       res.status(200).json({ success: true, message: 'Pago actualizado', data: result })
     } catch (error) { next(error) }
   })
 
-  // Historial de cambios de un pago (edición y comprobantes)
-  router.get('/:id/audit', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+  // Historial de cambios de un pago (edición y comprobantes) — solo admin
+  router.get('/:id/audit', authenticate, authorize('admin'), async (req, res, next) => {
     try {
       const result = await payments.getAuditLog(req.params.id)
       res.status(200).json({ success: true, message: 'Historial obtenido', data: result })
@@ -136,7 +136,7 @@ const paymentsRouter = (io) => {
   // Eliminar un pago
   router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {
     try {
-      const result = await payments.deleteOneById(req.params.id)
+      const result = await payments.deleteOneById(req.params.id, req.audit)
       res.status(200).json({ success: true, message: 'Pago eliminado', data: result })
     } catch (error) { next(error) }
   })
@@ -144,7 +144,7 @@ const paymentsRouter = (io) => {
   // Eliminar todos los pagos de un contrato (regenerar)
   router.delete('/contract/:contractId', authenticate, authorize('admin'), async (req, res, next) => {
     try {
-      const result = await payments.deleteByContract(req.params.contractId)
+      const result = await payments.deleteByContract(req.params.contractId, req.audit)
       res.status(200).json({ success: true, message: 'Pagos eliminados', data: result })
     } catch (error) { next(error) }
   })
@@ -169,7 +169,7 @@ router.post('/:id/vouchers', authenticate, authorize('admin', 'gerente', 'cobran
       }
 
       try {
-        const result = await payments.addVouchers(id, req.files, req.user)
+        const result = await payments.addVouchers(id, req.files, req.audit)
         io.emit('payment_voucher_added', { message: 'Comprobante agregado' })
         res.status(200).json({
           success: true,
@@ -189,7 +189,7 @@ router.post('/:id/vouchers', authenticate, authorize('admin', 'gerente', 'cobran
 router.delete('/:id/vouchers/:fileName', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
   try {
     const { id, fileName } = req.params
-    const result = await payments.removeVoucher(id, fileName, req.user)
+    const result = await payments.removeVoucher(id, fileName, req.audit)
     res.status(200).json({ success: true, message: 'Comprobante eliminado', data: result })
   } catch (error) { next(error) }
 })

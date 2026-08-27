@@ -47,7 +47,7 @@ const unitsRouter = (io) => {
   // Crear unidad
   router.post('/', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
-      const result = await units.create(req.body)
+      const result = await units.create(req.body, req.audit)
 
       io.emit('unit_created', { message: 'Se creó una nueva unidad', data: result })
 
@@ -65,7 +65,7 @@ const unitsRouter = (io) => {
   router.patch('/:id', authenticate, authorize('admin', 'gerente', 'vendedor'), async (req, res, next) => {
     try {
       const { id } = req.params
-      const result = await units.updateOneById(id, req.body)
+      const result = await units.updateOneById(id, req.body, req.audit)
 
       io.emit('unit_updated', { message: 'Se actualizó una unidad' })
 
@@ -83,7 +83,7 @@ const unitsRouter = (io) => {
   router.delete('/:id', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
       const { id } = req.params
-      const result = await units.deleteOneById(id)
+      const result = await units.deleteOneById(id, req.audit)
 
       io.emit('unit_deleted', { message: 'Se eliminó una unidad' })
 

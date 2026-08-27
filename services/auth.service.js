@@ -5,14 +5,16 @@ import jwt from 'jsonwebtoken'
 import config from '../config.js'
 import { sendMail } from './../utils/sendMail.js'
 import path from 'path'
+import AuditLog from './auditLog.service.js'
 
 class Auth{
   constructor(){
     this.jwtSecret = config.jwtSecret,
     this.jwtExpiration='1h'
+    this.auditLog = new AuditLog()
   }
 
-  async create(data){
+  async create(data, context){
 
     try {
       const { name, email, password } = data
@@ -35,6 +37,16 @@ class Auth{
       const result = await db.collection('users').insertOne(data)
 
       if(result.insertedId){
+        await this.auditLog.record({
+          entity: 'user',
+          entityId: result.insertedId,
+          entityLabel: name || email,
+          action: 'created',
+          actor: context?.actor,
+          snapshot: { _id: result.insertedId, ...data }, // password se redacta en record()
+          meta: context ? { ip: context.ip } : null
+        })
+
         const resetToken = jwt.sign(
           { userId: result.insertedId,email },
           this.jwtSecret,

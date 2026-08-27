@@ -2,6 +2,7 @@ import { ObjectId } from 'mongodb'
 import { db } from './../db/mongoClient.js'
 import Boom from '@hapi/boom'
 import AuditLog from './auditLog.service.js'
+import { diff } from '../utils/audit.util.js'
 
 const LOCKED_STATUSES = ['entregado', 'cancelado']
 
@@ -22,7 +23,7 @@ class Commissions {
     return { amount: value, description: description.trim() }
   }
 
-  async addSeller(contractId, { sellerId, amount, description } = {}, actor) {
+  async addSeller(contractId, { sellerId, amount, description } = {}, context) {
     try {
       if (!ObjectId.isValid(contractId)) throw Boom.badRequest('ID de contrato no válido')
       if (!ObjectId.isValid(sellerId)) throw Boom.badRequest('ID de vendedor no válido')
@@ -47,7 +48,7 @@ class Commissions {
         amount: value,
         description: desc,
         changedAt: now,
-        changedBy: actor || null
+        changedBy: context?.actor?.name || context?.actor?.email || null
       }
 
       const commission = {
@@ -70,6 +71,17 @@ class Commissions {
       }
 
       const result = await db.collection(this.collection).insertOne(commission)
+
+      await this.auditLog.record({
+        entity: 'commission',
+        entityId: result.insertedId,
+        entityLabel: [contract.contractNumber, seller.name].filter(Boolean).join(' · '),
+        action: 'commission_assigned',
+        actor: context?.actor,
+        snapshot: { _id: result.insertedId, ...commission },
+        meta: { ip: context?.ip || null, contractId, sellerId, amount: value }
+      })
+
       return { _id: result.insertedId, ...commission }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -77,7 +89,7 @@ class Commissions {
     }
   }
 
-  async updateSeller(contractId, sellerId, { amount, description } = {}, actor) {
+  async updateSeller(contractId, sellerId, { amount, description } = {}, context) {
     try {
       if (!ObjectId.isValid(contractId)) throw Boom.badRequest('ID de contrato no válido')
 
@@ -102,7 +114,7 @@ class Commissions {
         amount: value,
         description: desc,
         changedAt: now,
-        changedBy: actor || null
+        changedBy: context?.actor?.name || context?.actor?.email || null
       }
 
       await db.collection(this.collection).updateOne(
@@ -119,6 +131,22 @@ class Commissions {
         }
       )
 
+      const changes = diff(
+        { amount: existing.amount, description: existing.description },
+        { amount: value, description: desc }
+      )
+      if (changes.length) {
+        await this.auditLog.record({
+          entity: 'commission',
+          entityId: existing._id,
+          entityLabel: [existing.contractNumber, existing.sellerName].filter(Boolean).join(' · '),
+          action: 'commission_updated',
+          actor: context?.actor,
+          changes,
+          meta: { ip: context?.ip || null, contractId, sellerId }
+        })
+      }
+
       return await db.collection(this.collection).findOne({ _id: existing._id })
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -126,7 +154,7 @@ class Commissions {
     }
   }
 
-  async removeSeller(contractId, sellerId) {
+  async removeSeller(contractId, sellerId, context) {
     try {
       const existing = await db.collection(this.collection).findOne({ contractId, sellerId })
       if (!existing) throw Boom.notFound('No hay comisión asignada a este vendedor en este contrato')
@@ -136,6 +164,17 @@ class Commissions {
       }
 
       await db.collection(this.collection).deleteOne({ _id: existing._id })
+
+      await this.auditLog.record({
+        entity: 'commission',
+        entityId: existing._id,
+        entityLabel: [existing.contractNumber, existing.sellerName].filter(Boolean).join(' · '),
+        action: 'commission_removed',
+        actor: context?.actor,
+        snapshot: existing,
+        meta: { ip: context?.ip || null, contractId, sellerId }
+      })
+
       return { removed: true, sellerId }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -156,7 +195,7 @@ class Commissions {
     }
   }
 
-  async registerPayment(contractId, sellerId, { amount, paymentMethod, reference, notes, paymentDate, registeredBy } = {}) {
+  async registerPayment(contractId, sellerId, { amount, paymentMethod, reference, notes, paymentDate, registeredBy } = {}, context) {
     try {
       const commission = await db.collection(this.collection).findOne({ contractId, sellerId })
       if (!commission) throw Boom.notFound('No hay comisión asignada para este vendedor en este contrato')
@@ -197,6 +236,28 @@ class Commissions {
         }
       )
 
+      await this.auditLog.record({
+        entity: 'commission',
+        entityId: commission._id,
+        entityLabel: [commission.contractNumber, commission.sellerName].filter(Boolean).join(' · '),
+        action: 'commission_payment_registered',
+        actor: context?.actor,
+        changes: [
+          { field: 'paidAmount', from: commission.paidAmount, to: newPaidAmount },
+          { field: 'balance', from: commission.balance, to: newBalance },
+          { field: 'status', from: commission.status, to: newStatus }
+        ],
+        meta: {
+          ip: context?.ip || null,
+          contractId,
+          sellerId,
+          movementId: String(movement._id),
+          amount: value,
+          paymentMethod: movement.paymentMethod,
+          reference: movement.reference
+        }
+      })
+
       const updated = await db.collection(this.collection).findOne({ _id: commission._id })
       return { ...updated, movement }
     } catch (error) {
@@ -205,7 +266,7 @@ class Commissions {
     }
   }
 
-  async updateMovement(contractId, sellerId, movementId, updates = {}, actor) {
+  async updateMovement(contractId, sellerId, movementId, updates = {}, context) {
     try {
       if (!ObjectId.isValid(movementId)) throw Boom.badRequest('ID de movimiento no válido')
 
@@ -238,7 +299,7 @@ class Commissions {
             'movements.$.notes': updates.notes ?? movement.notes,
             'movements.$.paymentDate': updates.paymentDate ? new Date(updates.paymentDate) : movement.paymentDate,
             'movements.$.editedAt': now,
-            'movements.$.editedBy': actor?.name || actor?.email || null,
+            'movements.$.editedBy': context?.actor?.name || context?.actor?.email || null,
             paidAmount: newPaidAmount,
             balance: newBalance,
             status: newStatus,
@@ -250,14 +311,14 @@ class Commissions {
       await this.auditLog.record({
         entity: 'commission',
         entityId: commission._id,
-        action: 'movement_updated',
-        userId: actor?._id || actor?.id,
-        userName: actor?.name || actor?.email,
-        meta: {
-          movementId,
-          before: { amount: movement.amount, paymentMethod: movement.paymentMethod, reference: movement.reference, notes: movement.notes },
-          after: { amount: newAmount, paymentMethod: updates.paymentMethod ?? movement.paymentMethod, reference: updates.reference ?? movement.reference, notes: updates.notes ?? movement.notes }
-        }
+        entityLabel: [commission.contractNumber, commission.sellerName].filter(Boolean).join(' · '),
+        action: 'commission_payment_updated',
+        actor: context?.actor,
+        changes: diff(
+          { amount: movement.amount, paymentMethod: movement.paymentMethod, reference: movement.reference, notes: movement.notes },
+          { amount: newAmount, paymentMethod: updates.paymentMethod ?? movement.paymentMethod, reference: updates.reference ?? movement.reference, notes: updates.notes ?? movement.notes }
+        ),
+        meta: { ip: context?.ip || null, contractId, sellerId, movementId }
       })
 
       return await db.collection(this.collection).findOne({ _id: commission._id })
@@ -267,7 +328,7 @@ class Commissions {
     }
   }
 
-  async removeMovement(contractId, sellerId, movementId, actor) {
+  async removeMovement(contractId, sellerId, movementId, context) {
     try {
       if (!ObjectId.isValid(movementId)) throw Boom.badRequest('ID de movimiento no válido')
 
@@ -299,10 +360,16 @@ class Commissions {
       await this.auditLog.record({
         entity: 'commission',
         entityId: commission._id,
-        action: 'movement_removed',
-        userId: actor?._id || actor?.id,
-        userName: actor?.name || actor?.email,
-        meta: { movementId, amount: movement.amount }
+        entityLabel: [commission.contractNumber, commission.sellerName].filter(Boolean).join(' · '),
+        action: 'commission_payment_removed',
+        actor: context?.actor,
+        snapshot: movement,
+        changes: [
+          { field: 'paidAmount', from: commission.paidAmount, to: newPaidAmount },
+          { field: 'balance', from: commission.balance, to: newBalance },
+          { field: 'status', from: commission.status, to: newStatus }
+        ],
+        meta: { ip: context?.ip || null, contractId, sellerId, movementId, amount: movement.amount }
       })
 
       return await db.collection(this.collection).findOne({ _id: commission._id })
@@ -312,7 +379,7 @@ class Commissions {
     }
   }
 
-  async addVoucherToMovement(contractId, sellerId, movementId, files) {
+  async addVoucherToMovement(contractId, sellerId, movementId, files, context) {
     try {
       if (!ObjectId.isValid(movementId)) throw Boom.badRequest('ID de movimiento no válido')
 
@@ -336,6 +403,15 @@ class Commissions {
         }
       )
 
+      await this.auditLog.record({
+        entity: 'commission',
+        entityId: commission._id,
+        entityLabel: [commission.contractNumber, commission.sellerName].filter(Boolean).join(' · '),
+        action: 'commission_voucher_added',
+        actor: context?.actor,
+        meta: { ip: context?.ip || null, contractId, sellerId, movementId, files: vouchers.map(v => v.originalName) }
+      })
+
       return { added: vouchers.length, vouchers }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -343,9 +419,11 @@ class Commissions {
     }
   }
 
-  async removeVoucherFromMovement(contractId, sellerId, movementId, fileName) {
+  async removeVoucherFromMovement(contractId, sellerId, movementId, fileName, context) {
     try {
       if (!ObjectId.isValid(movementId)) throw Boom.badRequest('ID de movimiento no válido')
+
+      const commission = await db.collection(this.collection).findOne({ contractId, sellerId })
 
       await db.collection(this.collection).updateOne(
         { contractId, sellerId, 'movements._id': new ObjectId(movementId) },
@@ -360,6 +438,15 @@ class Commissions {
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath)
       }
+
+      await this.auditLog.record({
+        entity: 'commission',
+        entityId: commission?._id,
+        entityLabel: [commission?.contractNumber, commission?.sellerName].filter(Boolean).join(' · '),
+        action: 'commission_voucher_removed',
+        actor: context?.actor,
+        meta: { ip: context?.ip || null, contractId, sellerId, movementId, fileName }
+      })
 
       return { removed: fileName }
     } catch (error) {

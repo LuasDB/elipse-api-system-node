@@ -5,6 +5,7 @@ import { createServer } from 'http'
 import { Server } from 'socket.io'
 import { logErrors,errorHandler} from './middlewares/hanldeErrors.js'
 import { client } from './db/mongoClient.js'
+import AuditLog from './services/auditLog.service.js'
 import swaggerUi from 'swagger-ui-express'
 import { readFile } from 'fs/promises'
 import scheduleFileCleanup from './utils/fileCleanup.util.js'
@@ -61,6 +62,9 @@ const startServer = async ()=>{
   try {
     await client.connect()
     console.log('✅ Conectado a MongoDB')
+
+    // Índices de la bitácora de auditoría
+    await new AuditLog().ensureIndexes()
 
     //Rutas
     AppRouter(app,io)
