@@ -424,6 +424,80 @@ class Payments {
     }
   }
 
+  // Revierte un pago capturado por error: lo regresa a "pendiente", borra sus
+  // movimientos (guardándolos en el snapshot de la bitácora) y deja el saldo
+  // completo. Todo lo derivado (resumen del contrato, "cobrado este mes",
+  // cobranza por periodo, contratos abiertos) se recalcula en vivo desde este
+  // documento, así que revertirlo aquí basta para ajustar el resto.
+  //
+  // Acción sensible: la ruta la protege con `requirePassword`.
+  async revertPayment(id, context) {
+    try {
+      if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
+
+      const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+      if (!payment) throw Boom.notFound('Pago no encontrado')
+
+      const removedMovements = payment.movements || []
+      if ((payment.paidAmount || 0) === 0 && removedMovements.length === 0 && payment.status === 'pendiente') {
+        throw Boom.badRequest('Este pago no tiene cobros que revertir')
+      }
+
+      const now = new Date()
+      const set = {
+        paidAmount: 0,
+        balance: payment.expectedAmount,
+        status: 'pendiente',
+        paidDate: null,
+        movements: [],
+        updatedAt: now
+      }
+      const unset = { lastExchangeRate: '', lastExchangeRateDate: '' }
+
+      const changes = [
+        { field: 'status', from: payment.status, to: 'pendiente' },
+        { field: 'paidAmount', from: payment.paidAmount, to: 0 },
+        { field: 'balance', from: payment.balance, to: payment.expectedAmount }
+      ]
+
+      // Si es un hito ya marcado como completado, revertir también su estado:
+      // `completeMilestone` exige paidAmount > 0, así que dejarlo "completado"
+      // sin cobros sería incongruente.
+      if (payment.isMilestone && payment.milestoneStatus === 'completado') {
+        set.milestoneStatus = 'pendiente'
+        unset.milestoneCompletedAt = ''
+        unset.milestoneCompletedBy = ''
+        changes.push({ field: 'milestoneStatus', from: 'completado', to: 'pendiente' })
+      }
+
+      await db.collection(this.collection).updateOne(
+        { _id: payment._id },
+        { $set: set, $unset: unset }
+      )
+
+      await this.auditLog.record({
+        entity: 'payment',
+        entityId: id,
+        entityLabel: [payment.concept, payment.unitIdentifier].filter(Boolean).join(' · '),
+        action: 'payment_reverted',
+        actor: context?.actor,
+        changes,
+        snapshot: { removedMovements },
+        meta: {
+          ip: context?.ip || null,
+          contractId: payment.contractId,
+          confirmedWithPassword: context?.confirmedWithPassword || false,
+          removedMovementsCount: removedMovements.length
+        }
+      })
+
+      return await db.collection(this.collection).findOne({ _id: payment._id })
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al revertir el pago', error)
+    }
+  }
+
   async getAuditLog(id) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')

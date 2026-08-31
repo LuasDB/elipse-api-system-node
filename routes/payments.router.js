@@ -3,6 +3,7 @@ import Boom from '@hapi/boom'
 import Payments from './../services/payments.service.js'
 import Contracts from './../services/contracts.service.js'
 import { authenticate, authorize } from './../middlewares/authMiddleware.js'
+import { requirePassword } from './../middlewares/stepUpAuth.js'
 
 const router = express.Router()
 const payments = new Payments()
@@ -113,6 +114,16 @@ const paymentsRouter = (io) => {
       const result = await payments.updateMilestoneCommitment(req.params.id, req.body, req.audit)
       io.emit('milestone_commitment_updated', { paymentId: req.params.id, ...result })
       res.status(200).json({ success: true, message: 'Fecha compromiso actualizada', data: result })
+    } catch (error) { next(error) }
+  })
+
+  // Revertir un pago capturado por error: lo regresa a "pendiente" y borra sus
+  // movimientos. Exige la contraseña del admin (header X-Confirm-Password).
+  router.post('/:id/revert', authenticate, authorize('admin'), requirePassword, async (req, res, next) => {
+    try {
+      const result = await payments.revertPayment(req.params.id, req.audit)
+      io.emit('payment_updated', { paymentId: req.params.id })
+      res.status(200).json({ success: true, message: 'Pago revertido a pendiente', data: result })
     } catch (error) { next(error) }
   })
 
