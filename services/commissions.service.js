@@ -159,7 +159,7 @@ class Commissions {
       const existing = await db.collection(this.collection).findOne({ contractId, sellerId })
       if (!existing) throw Boom.notFound('No hay comisión asignada a este vendedor en este contrato')
 
-      if ((existing.paidAmount || 0) > 0) {
+      if (!context?.override && (existing.paidAmount || 0) > 0) {
         throw Boom.forbidden('No se puede quitar a este vendedor: ya tiene pagos de comisión registrados')
       }
 

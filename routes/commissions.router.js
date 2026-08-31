@@ -2,6 +2,7 @@ import express from 'express'
 import Boom from '@hapi/boom'
 import Commissions from './../services/commissions.service.js'
 import { authenticate, authorize } from './../middlewares/authMiddleware.js'
+import { requirePassword } from './../middlewares/stepUpAuth.js'
 
 const router = express.Router()
 const commissions = new Commissions()
@@ -42,8 +43,9 @@ const commissionsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
-  // Quitar a un vendedor de un contrato (solo admin, solo si no tiene pagos registrados)
-  router.delete('/contract/:contractId/sellers/:sellerId', authenticate, authorize('admin'), async (req, res, next) => {
+  // Quitar a un vendedor de un contrato. Con contraseña de admin (requirePassword)
+  // se permite incluso si ya tiene pagos de comisión registrados (context.override).
+  router.delete('/contract/:contractId/sellers/:sellerId', authenticate, authorize('admin'), requirePassword, async (req, res, next) => {
     try {
       const result = await commissions.removeSeller(req.params.contractId, req.params.sellerId, req.audit)
       io.emit('commission_assigned', { contractId: req.params.contractId, message: 'Vendedor quitado del contrato' })
@@ -118,8 +120,8 @@ const commissionsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
-  // Eliminar un pago de comisión ya registrado (solo admin)
-  router.delete('/contract/:contractId/sellers/:sellerId/payments/:movementId', authenticate, authorize('admin'), async (req, res, next) => {
+  // Eliminar un pago de comisión ya registrado (solo admin, exige contraseña)
+  router.delete('/contract/:contractId/sellers/:sellerId/payments/:movementId', authenticate, authorize('admin'), requirePassword, async (req, res, next) => {
     try {
       const { contractId, sellerId, movementId } = req.params
       const result = await commissions.removeMovement(contractId, sellerId, movementId, req.audit)

@@ -144,18 +144,21 @@ const paymentsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
-  // Eliminar un pago
-  router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {
+  // Eliminar un pago. Con contraseña de admin (requirePassword) se permite
+  // incluso si ya está 'pagado' (context.override).
+  router.delete('/:id', authenticate, authorize('admin'), requirePassword, async (req, res, next) => {
     try {
       const result = await payments.deleteOneById(req.params.id, req.audit)
+      io.emit('payment_updated', { paymentId: req.params.id })
       res.status(200).json({ success: true, message: 'Pago eliminado', data: result })
     } catch (error) { next(error) }
   })
 
-  // Eliminar todos los pagos de un contrato (regenerar)
-  router.delete('/contract/:contractId', authenticate, authorize('admin'), async (req, res, next) => {
+  // Eliminar todos los pagos de un contrato (regenerar). Exige contraseña de admin.
+  router.delete('/contract/:contractId', authenticate, authorize('admin'), requirePassword, async (req, res, next) => {
     try {
       const result = await payments.deleteByContract(req.params.contractId, req.audit)
+      io.emit('payments_generated', { message: 'Pagos del contrato eliminados' })
       res.status(200).json({ success: true, message: 'Pagos eliminados', data: result })
     } catch (error) { next(error) }
   })

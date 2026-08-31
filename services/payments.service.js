@@ -849,7 +849,9 @@ class Payments {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('ID no válido')
       const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
       if (!payment) throw Boom.notFound('Pago no encontrado')
-      if (payment.status === 'pagado') throw Boom.conflict('No se puede eliminar un pago ya registrado')
+      if (!context?.override && payment.status === 'pagado') {
+        throw Boom.conflict('No se puede eliminar un pago ya registrado')
+      }
 
       const result = await db.collection(this.collection).deleteOne({ _id: new ObjectId(id) })
 
@@ -860,7 +862,11 @@ class Payments {
         action: 'deleted',
         actor: context?.actor,
         snapshot: payment,
-        meta: { ip: context?.ip || null, contractId: payment.contractId }
+        meta: {
+          ip: context?.ip || null,
+          contractId: payment.contractId,
+          confirmedWithPassword: context?.confirmedWithPassword || false
+        }
       })
 
       return result
