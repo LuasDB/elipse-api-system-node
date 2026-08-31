@@ -1,3 +1,4 @@
+import { ObjectId } from 'mongodb'
 import { db } from './../db/mongoClient.js'
 import Boom from '@hapi/boom'
 import bcrypt from 'bcrypt'
@@ -112,6 +113,40 @@ class Auth{
         throw error
       }
       throw Boom.badImplementation('Error al registrar usuario',error)
+    }
+  }
+
+  // Re-autenticación ("step-up auth"): confirma que quien pide una acción sensible
+  // realmente conoce la contraseña del usuario en sesión. Se revalida el rol contra
+  // la BD (no contra el JWT) por si se le revocó el rol a media sesión.
+  async verifyPassword(userId, password, { requiredRole = 'admin' } = {}){
+    try {
+      if(!userId || !ObjectId.isValid(String(userId))){
+        throw Boom.unauthorized('Usuario no válido')
+      }
+      if(!password){
+        throw Boom.unauthorized('Contraseña requerida para autorizar esta acción')
+      }
+
+      const user = await db.collection('users').findOne({ _id: new ObjectId(String(userId)) })
+      if(!user || !user.password){
+        throw Boom.unauthorized('Usuario no válido')
+      }
+      if(requiredRole && user.role !== requiredRole){
+        throw Boom.forbidden('Solo un administrador puede autorizar esta acción')
+      }
+
+      const isValid = await bcrypt.compare(password, user.password)
+      if(!isValid){
+        throw Boom.unauthorized('Contraseña incorrecta')
+      }
+
+      return true
+    } catch (error) {
+      if(Boom.isBoom(error)){
+        throw error
+      }
+      throw Boom.badImplementation('Error al verificar la contraseña', error)
     }
   }
 

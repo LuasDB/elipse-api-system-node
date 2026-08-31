@@ -8,7 +8,12 @@ export const buildAuditContext = (req) => {
   return {
     actor: actorFrom(req.user),
     ip: forwarded || req.socket?.remoteAddress || req.ip || null,
-    userAgent: req.headers?.['user-agent'] || null
+    userAgent: req.headers?.['user-agent'] || null,
+    // Se activan en `requirePassword` (middlewares/stepUpAuth.js) cuando el usuario
+    // confirma su contraseña. `override` habilita el bypass de candados de negocio
+    // reservado al admin; `confirmedWithPassword` deja rastro en la bitácora.
+    override: false,
+    confirmedWithPassword: false
   }
 }
 

@@ -63,6 +63,19 @@ router.post('/reset-password', async (req, res, next) => {
   }
 });
 
+// Pre-validación de la contraseña para acciones sensibles ("step-up auth").
+// El frontend la llama antes de mostrar la confirmación final, para dar feedback
+// inmediato. La autorización real la vuelve a checar `requirePassword` en cada
+// endpoint destructivo.
+router.post('/verify-password', authenticate, async (req, res, next) => {
+  try {
+    await auth.verifyPassword(req.user._id || req.user.userId, req.body?.password)
+    res.status(200).json({ success:true, message:'Autorización válida' })
+  } catch (error) {
+    next(error)
+  }
+});
+
 
 
 
