@@ -1,13 +1,16 @@
 import { ObjectId } from 'mongodb'
 import { db } from './../db/mongoClient.js'
 import Boom from '@hapi/boom'
+import AuditLog from './auditLog.service.js'
+import { diff } from '../utils/audit.util.js'
 
 class Units {
   constructor() {
     this.collection = 'units'
+    this.auditLog = new AuditLog()
   }
 
-  async create(data) {
+  async create(data, context) {
     try {
       const { projectId, identifier } = data
       if (!projectId) throw Boom.badData('El ID del proyecto es requerido')
@@ -48,6 +51,17 @@ class Units {
       }
 
       const result = await db.collection(this.collection).insertOne(unit)
+
+      await this.auditLog.record({
+        entity: 'unit',
+        entityId: result.insertedId,
+        entityLabel: unit.identifier,
+        action: 'created',
+        actor: context?.actor,
+        snapshot: { _id: result.insertedId, ...unit },
+        meta: context ? { ip: context.ip } : null
+      })
+
       return { _id: result.insertedId, ...unit }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -94,7 +108,7 @@ class Units {
     }
   }
 
-  async updateOneById(id, newData) {
+  async updateOneById(id, newData, context) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID de la unidad no es válido')
 
@@ -103,6 +117,11 @@ class Units {
 
       // Convertir numéricos
       const numericFields = ['totalArea', 'builtArea', 'coveredArea', 'openArea', 'bedrooms', 'bathrooms', 'halfBathrooms', 'parkingSpaces', 'listPrice', 'finalPrice', 'floor', 'terraceArea', 'gardenArea', 'storageArea']
+
+      const existing = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+      if (!existing) {
+        throw Boom.notFound(`No se encontró la unidad con ID ${id}`)
+      }
 
       const result = await db.collection(this.collection).updateOne(
         { _id: new ObjectId(id) },
@@ -113,6 +132,19 @@ class Units {
         throw Boom.notFound(`No se encontró la unidad con ID ${id}`)
       }
 
+      const changes = diff(existing, dataToUpdate)
+      if (changes.length) {
+        await this.auditLog.record({
+          entity: 'unit',
+          entityId: id,
+          entityLabel: existing.identifier,
+          action: 'updated',
+          actor: context?.actor,
+          changes,
+          meta: context ? { ip: context.ip } : null
+        })
+      }
+
       return result
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -120,14 +152,26 @@ class Units {
     }
   }
 
-  async deleteOneById(id) {
+  async deleteOneById(id, context) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID de la unidad no es válido')
 
       // TODO: Verificar si tiene contrato o pagos asociados antes de eliminar
 
+      const existing = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+
       const result = await db.collection(this.collection).deleteOne({ _id: new ObjectId(id) })
       if (result.deletedCount === 0) throw Boom.notFound(`No se encontró la unidad con ID ${id}`)
+
+      await this.auditLog.record({
+        entity: 'unit',
+        entityId: id,
+        entityLabel: existing?.identifier,
+        action: 'deleted',
+        actor: context?.actor,
+        snapshot: existing,
+        meta: context ? { ip: context.ip } : null
+      })
 
       return result
     } catch (error) {

@@ -55,7 +55,7 @@ const sellersRouter = (io) => {
         return next(Boom.badRequest('No se recibieron archivos'))
       }
       try {
-        const result = await sellers.addAttachments(req.params.id, req.files, req.user)
+        const result = await sellers.addAttachments(req.params.id, req.files, req.audit)
         io.emit('seller_attachment_added', { sellerId: req.params.id })
         res.status(200).json({ success: true, message: `${result.length} archivo(s) subido(s)`, data: result })
       } catch (error) { next(error) }
@@ -65,14 +65,14 @@ const sellersRouter = (io) => {
   // Eliminar un adjunto de un vendedor — solo admin
   router.delete('/:id/attachments/:attachmentId', authenticate, authorize('admin'), async (req, res, next) => {
     try {
-      const result = await sellers.deleteAttachment(req.params.id, req.params.attachmentId, req.user)
+      const result = await sellers.deleteAttachment(req.params.id, req.params.attachmentId, req.audit)
       io.emit('seller_attachment_removed', { sellerId: req.params.id })
       res.status(200).json({ success: true, message: 'Adjunto eliminado', data: result })
     } catch (error) { next(error) }
   })
 
-  // Historial de cambios de un vendedor (adjuntos, edición de datos)
-  router.get('/:id/audit', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+  // Historial de cambios de un vendedor (adjuntos, edición de datos) — solo admin
+  router.get('/:id/audit', authenticate, authorize('admin'), async (req, res, next) => {
     try {
       const result = await sellers.getAuditLog(req.params.id)
       res.status(200).json({ success: true, message: 'Historial obtenido', data: result })

@@ -1,13 +1,16 @@
 import { ObjectId } from 'mongodb'
 import { db } from './../db/mongoClient.js'
 import Boom from '@hapi/boom'
+import AuditLog from './auditLog.service.js'
+import { diff } from '../utils/audit.util.js'
 
 class Projects {
   constructor() {
     this.collection = 'projects'
+    this.auditLog = new AuditLog()
   }
 
-  async create(data) {
+  async create(data, context) {
     try {
       const { name } = data
       if (!name || !name.trim()) {
@@ -23,6 +26,17 @@ class Projects {
       }
 
       const result = await db.collection(this.collection).insertOne(project)
+
+      await this.auditLog.record({
+        entity: 'project',
+        entityId: result.insertedId,
+        entityLabel: project.name,
+        action: 'created',
+        actor: context?.actor,
+        snapshot: { _id: result.insertedId, ...project },
+        meta: context ? { ip: context.ip } : null
+      })
+
       return { _id: result.insertedId, ...project }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -128,7 +142,7 @@ class Projects {
     }
   }
 
-  async updateOneById(id, newData) {
+  async updateOneById(id, newData, context) {
     try {
       if (!ObjectId.isValid(id)) {
         throw Boom.badRequest('El ID del proyecto no es válido')
@@ -137,6 +151,11 @@ class Projects {
       const { _id, unitStats, ...dataToUpdate } = newData
       dataToUpdate.updatedAt = new Date()
       if (dataToUpdate.totalUnits) dataToUpdate.totalUnits = Number(dataToUpdate.totalUnits)
+
+      const existing = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+      if (!existing) {
+        throw Boom.notFound(`No se encontró el proyecto con ID ${id}`)
+      }
 
       const result = await db.collection(this.collection).updateOne(
         { _id: new ObjectId(id) },
@@ -147,6 +166,19 @@ class Projects {
         throw Boom.notFound(`No se encontró el proyecto con ID ${id}`)
       }
 
+      const changes = diff(existing, dataToUpdate)
+      if (changes.length) {
+        await this.auditLog.record({
+          entity: 'project',
+          entityId: id,
+          entityLabel: existing.name,
+          action: 'updated',
+          actor: context?.actor,
+          changes,
+          meta: context ? { ip: context.ip } : null
+        })
+      }
+
       return result
     } catch (error) {
       if (Boom.isBoom(error)) throw error
@@ -154,7 +186,7 @@ class Projects {
     }
   }
 
-  async deleteOneById(id) {
+  async deleteOneById(id, context) {
     try {
       if (!ObjectId.isValid(id)) {
         throw Boom.badRequest('El ID del proyecto no es válido')
@@ -166,11 +198,23 @@ class Projects {
         throw Boom.conflict(`No se puede eliminar el proyecto porque tiene ${unitsCount} unidades asociadas. Elimina las unidades primero.`)
       }
 
+      const existing = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+
       const result = await db.collection(this.collection).deleteOne({ _id: new ObjectId(id) })
 
       if (result.deletedCount === 0) {
         throw Boom.notFound(`No se encontró el proyecto con ID ${id}`)
       }
+
+      await this.auditLog.record({
+        entity: 'project',
+        entityId: id,
+        entityLabel: existing?.name,
+        action: 'deleted',
+        actor: context?.actor,
+        snapshot: existing,
+        meta: context ? { ip: context.ip } : null
+      })
 
       return result
     } catch (error) {

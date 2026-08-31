@@ -2,6 +2,7 @@ import express from 'express'
 import Boom from '@hapi/boom'
 import Contracts from './../services/contracts.service.js'
 import { authenticate, authorize } from './../middlewares/authMiddleware.js'
+import { requirePassword } from './../middlewares/stepUpAuth.js'
 
 const router = express.Router()
 const contracts = new Contracts()
@@ -37,7 +38,7 @@ const contractsRouter = (io) => {
 
   router.post('/', authenticate, authorize('admin', 'gerente', 'vendedor'), async (req, res, next) => {
     try {
-      const result = await contracts.create(req.body)
+      const result = await contracts.create(req.body, req.audit)
       io.emit('contract_created', { message: 'Nuevo contrato registrado', data: result })
       res.status(201).json({ success: true, message: 'Contrato creado', data: result })
     } catch (error) { next(error) }
@@ -45,17 +46,19 @@ const contractsRouter = (io) => {
 
   router.patch('/:id', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
-      const result = await contracts.updateOneById(req.params.id, req.body)
+      const result = await contracts.updateOneById(req.params.id, req.body, req.audit)
       io.emit('contract_updated', { message: 'Contrato actualizado' })
       res.status(200).json({ success: true, message: 'Contrato actualizado', data: result })
     } catch (error) { next(error) }
   })
 
-  router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {
+  // Baja total con cascada (pagos, comisiones, archivos) + liberación de la unidad.
+  // `requirePassword` exige la contraseña del admin (header X-Confirm-Password).
+  router.delete('/:id', authenticate, authorize('admin'), requirePassword, async (req, res, next) => {
     try {
-      const result = await contracts.deleteOneById(req.params.id)
-      io.emit('contract_deleted', { message: 'Contrato eliminado' })
-      res.status(200).json({ success: true, message: 'Contrato eliminado', data: result })
+      const result = await contracts.hardDeleteContract(req.params.id, req.audit)
+      io.emit('contract_deleted', { message: 'Contrato eliminado', data: result })
+      res.status(200).json({ success: true, message: 'Contrato y datos asociados eliminados', data: result })
     } catch (error) { next(error) }
   })
 
@@ -77,7 +80,7 @@ router.post('/:id/files', authenticate, authorize('admin', 'gerente', 'vendedor'
       }
 
       try {
-        const result = await contracts.addFiles(id, req.files)
+        const result = await contracts.addFiles(id, req.files, req.audit)
         io.emit('contract_files_added', { message: 'Archivos agregados al contrato' })
         res.status(200).json({
           success: true,
@@ -97,7 +100,7 @@ router.post('/:id/files', authenticate, authorize('admin', 'gerente', 'vendedor'
 router.delete('/:id/files/:fileName', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
   try {
     const { id, fileName } = req.params
-    const result = await contracts.removeFile(id, fileName)
+    const result = await contracts.removeFile(id, fileName, req.audit)
     res.status(200).json({ success: true, message: 'Archivo eliminado', data: result })
   } catch (error) { next(error) }
 })

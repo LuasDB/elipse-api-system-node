@@ -1,10 +1,14 @@
 import { ObjectId } from 'mongodb'
-import { db } from './../db/mongoClient.js'
+import { promises as fsp } from 'fs'
+import { db, client } from './../db/mongoClient.js'
 import Boom from '@hapi/boom'
+import AuditLog from './auditLog.service.js'
+import { diff } from '../utils/audit.util.js'
 
 class Contracts {
   constructor() {
     this.collection = 'contracts'
+    this.auditLog = new AuditLog()
   }
 
   
@@ -49,7 +53,7 @@ class Contracts {
     return map[contractStatus] || null
   }
 
-  async create(data) {
+  async create(data, context) {
     try {
       const { projectId, unitId, buyerId, sellerId, modality } = data
 
@@ -124,10 +128,20 @@ class Contracts {
       try {
         const { default: PaymentsService } = await import('./payments.service.js')
         const paymentsService = new PaymentsService()
-        await paymentsService.generateSchedule(result.insertedId.toString())
+        await paymentsService.generateSchedule(result.insertedId.toString(), context)
       } catch (genErr) {
         console.error('Error al auto-generar calendario:', genErr)
       }
+
+      await this.auditLog.record({
+        entity: 'contract',
+        entityId: result.insertedId,
+        entityLabel: contract.contractNumber,
+        action: 'created',
+        actor: context?.actor,
+        snapshot: { _id: result.insertedId, ...contract },
+        meta: context ? { ip: context.ip } : null
+      })
 
       return { _id: result.insertedId, ...contract }
     } catch (error) {
@@ -233,7 +247,7 @@ class Contracts {
     }
   }
 
-  async updateOneById(id, newData) {
+  async updateOneById(id, newData, context) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('ID no válido')
 
@@ -290,13 +304,26 @@ class Contracts {
         { $set: { ...dataToUpdate, updatedAt: new Date() } }
       )
 
+      const changes = diff(existing, dataToUpdate)
+      if (changes.length) {
+        await this.auditLog.record({
+          entity: 'contract',
+          entityId: id,
+          entityLabel: existing.contractNumber,
+          action: 'updated',
+          actor: context?.actor,
+          changes,
+          meta: context ? { ip: context.ip } : null
+        })
+      }
+
       // Regenerar calendario si aplica (preservando pagos cobrados)
       let regenerationResult = null
       if (shouldRegenerate) {
         try {
           const { default: PaymentsService } = await import('./payments.service.js')
           const paymentsService = new PaymentsService()
-          regenerationResult = await paymentsService.regenerateSchedulePreservingPaid(id)
+          regenerationResult = await paymentsService.regenerateSchedulePreservingPaid(id, context)
         } catch (regenErr) {
           console.error('Error al regenerar calendario:', regenErr)
         }
@@ -314,35 +341,127 @@ class Contracts {
     }
   }
 
-  async deleteOneById(id) {
+  // Baja total del contrato con cascada: borra pagos (incluidos los cobrados) y
+  // comisiones + sus pagos, libera la unidad (vuelve a 'disponible') y elimina los
+  // archivos en disco. Todo lo borrado queda con snapshot en la bitácora.
+  //
+  // Es una acción sensible: la ruta la protege con `requirePassword`, que además
+  // deja `context.confirmedWithPassword = true`.
+  async hardDeleteContract(id, context) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID del contrato no es válido')
 
       const contract = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
       if (!contract) throw Boom.notFound(`No se encontró el contrato con ID ${id}`)
 
-      // Liberar la unidad
-      if (contract.unitId && ObjectId.isValid(contract.unitId)) {
-        await db.collection('units').updateOne(
-          { _id: new ObjectId(contract.unitId) },
-          { $set: { status: 'disponible', buyerId: null, updatedAt: new Date() } }
-        )
+      const unitId = contract.unitId && ObjectId.isValid(contract.unitId)
+        ? new ObjectId(contract.unitId)
+        : null
+
+      let payments = []
+      let commissions = []
+      let unitReleased = false
+
+      // Transacción: o se borra todo y se libera la unidad, o no se toca nada.
+      // Las lecturas van dentro para que el snapshot sea exactamente lo borrado.
+      const session = client.startSession()
+      try {
+        await session.withTransaction(async () => {
+          payments = await db.collection('payments').find({ contractId: id }, { session }).toArray()
+          commissions = await db.collection('commissions').find({ contractId: id }, { session }).toArray()
+
+          await db.collection('payments').deleteMany({ contractId: id }, { session })
+          await db.collection('commissions').deleteMany({ contractId: id }, { session })
+          await db.collection(this.collection).deleteOne({ _id: new ObjectId(id) }, { session })
+          if (unitId) {
+            const r = await db.collection('units').updateOne(
+              { _id: unitId },
+              { $set: { status: 'disponible', buyerId: null, updatedAt: new Date() } },
+              { session }
+            )
+            unitReleased = r.matchedCount > 0
+          }
+        })
+      } finally {
+        await session.endSession()
       }
 
-      // Limpiar datos dependientes (antes no se hacía: dejaba pagos/comisiones huérfanos
-      // que inflaban conteos globales como el del Dashboard).
-      await db.collection('payments').deleteMany({ contractId: id })
-      await db.collection('commissions').deleteMany({ contractId: id })
+      // A partir de aquí ya está confirmado en BD. La bitácora nunca debe tumbar
+      // la operación (auditLog.record swallowea sus propios errores).
+      const confirmedWithPassword = context?.confirmedWithPassword || false
 
-      const result = await db.collection(this.collection).deleteOne({ _id: new ObjectId(id) })
-      return result
+      // 1) Registro maestro con el snapshot completo de lo eliminado.
+      await this.auditLog.record({
+        entity: 'contract',
+        entityId: id,
+        entityLabel: contract.contractNumber,
+        action: 'contract_hard_deleted',
+        actor: context?.actor,
+        snapshot: { contract, payments, commissions },
+        meta: {
+          ip: context?.ip || null,
+          confirmedWithPassword,
+          unitReleased,
+          cascade: { payments: payments.length, commissions: commissions.length }
+        }
+      })
+
+      // 2) Un registro por entidad borrada, para que su historial propio
+      //    (GET /audit/payment/:id, GET /audit/commission/:id) muestre la baja.
+      for (const p of payments) {
+        await this.auditLog.record({
+          entity: 'payment',
+          entityId: p._id,
+          entityLabel: [p.concept, p.unitIdentifier].filter(Boolean).join(' · '),
+          action: 'deleted',
+          actor: context?.actor,
+          snapshot: p,
+          meta: { ip: context?.ip || null, contractId: id, reason: 'contract_hard_deleted', confirmedWithPassword }
+        })
+      }
+      for (const c of commissions) {
+        await this.auditLog.record({
+          entity: 'commission',
+          entityId: c._id,
+          entityLabel: [c.contractNumber, c.sellerName].filter(Boolean).join(' · '),
+          action: 'deleted',
+          actor: context?.actor,
+          snapshot: c,
+          meta: { ip: context?.ip || null, contractId: id, reason: 'contract_hard_deleted', confirmedWithPassword }
+        })
+      }
+
+      // 3) Limpieza de archivos en disco (no fatal).
+      await this.cleanupContractFilesFromDisk(id, payments)
+
+      return {
+        deleted: { contract: 1, payments: payments.length, commissions: commissions.length },
+        unitReleased
+      }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al eliminar el contrato', error)
     }
   }
 
-  async addFiles(id, files) {
+  // Borra los directorios de adjuntos asociados al contrato. Nunca lanza:
+  // un archivo que no se pudo borrar no debe revertir la baja ya confirmada.
+  async cleanupContractFilesFromDisk(contractId, payments = []) {
+    const dirs = [
+      `uploads/contracts/${contractId}`,
+      `uploads/commissions/${contractId}`, // multer anida por /<sellerId> debajo
+      ...payments.map((p) => `uploads/payments/${p._id}`)
+    ]
+    for (const dir of dirs) {
+      try {
+        await fsp.rm(dir, { recursive: true, force: true })
+      } catch (err) {
+        console.error(`No se pudo eliminar el directorio ${dir}:`, err.message)
+      }
+    }
+  }
+
+  async addFiles(id, files, context) {
   try {
     if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID del contrato no es válido')
 
@@ -366,6 +485,15 @@ class Contracts {
       }
     )
 
+    await this.auditLog.record({
+      entity: 'contract',
+      entityId: id,
+      entityLabel: contract.contractNumber,
+      action: 'file_added',
+      actor: context?.actor,
+      meta: { ip: context?.ip || null, files: fileRecords.map(f => f.originalName) }
+    })
+
     return { filesAdded: fileRecords.length, files: fileRecords }
   } catch (error) {
     if (Boom.isBoom(error)) throw error
@@ -373,9 +501,11 @@ class Contracts {
   }
 }
 
-async removeFile(id, fileName) {
+async removeFile(id, fileName, context) {
   try {
     if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID del contrato no es válido')
+
+    const contract = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
 
     const result = await db.collection(this.collection).updateOne(
       { _id: new ObjectId(id) },
@@ -390,7 +520,16 @@ async removeFile(id, fileName) {
     const fs = await import('fs')
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath)
-    } 
+    }
+
+    await this.auditLog.record({
+      entity: 'contract',
+      entityId: id,
+      entityLabel: contract?.contractNumber,
+      action: 'file_removed',
+      actor: context?.actor,
+      meta: { ip: context?.ip || null, fileName }
+    })
 
     return result
   } catch (error) {

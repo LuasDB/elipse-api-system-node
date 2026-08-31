@@ -52,7 +52,7 @@ const usersRouter = (io)=>{
     try {
       const { body } = req
       const { id } = req.params
-      const result = await user.updateOneById(id,body)
+      const result = await user.updateOneById(id, body, req.audit)
       res.status(200).json({
         success:true,
         message:'Registro actualizado',
@@ -66,7 +66,7 @@ const usersRouter = (io)=>{
   router.delete('/:id',authenticate,authorize('admin'),async(req, res,next )=>{
     try {
       const { id } = req.params
-      const result = await user.deleteOneById(id)
+      const result = await user.deleteOneById(id, req.audit)
 
       res.status(200).json({
         success:true,

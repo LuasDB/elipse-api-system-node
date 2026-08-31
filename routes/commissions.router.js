@@ -2,6 +2,7 @@ import express from 'express'
 import Boom from '@hapi/boom'
 import Commissions from './../services/commissions.service.js'
 import { authenticate, authorize } from './../middlewares/authMiddleware.js'
+import { requirePassword } from './../middlewares/stepUpAuth.js'
 
 const router = express.Router()
 const commissions = new Commissions()
@@ -27,7 +28,7 @@ const commissionsRouter = (io) => {
   // Agregar un vendedor con su comisión a un contrato (solo admin)
   router.post('/contract/:contractId/sellers', authenticate, authorize('admin'), async (req, res, next) => {
     try {
-      const result = await commissions.addSeller(req.params.contractId, req.body, req.user?._id || req.user?.id || null)
+      const result = await commissions.addSeller(req.params.contractId, req.body, req.audit)
       io.emit('commission_assigned', { contractId: req.params.contractId, message: 'Comisión asignada' })
       res.status(201).json({ success: true, message: 'Vendedor agregado al contrato', data: result })
     } catch (error) { next(error) }
@@ -36,16 +37,17 @@ const commissionsRouter = (io) => {
   // Actualizar el monto/descripción de la comisión de un vendedor en un contrato (solo admin)
   router.patch('/contract/:contractId/sellers/:sellerId', authenticate, authorize('admin'), async (req, res, next) => {
     try {
-      const result = await commissions.updateSeller(req.params.contractId, req.params.sellerId, req.body, req.user?._id || req.user?.id || null)
+      const result = await commissions.updateSeller(req.params.contractId, req.params.sellerId, req.body, req.audit)
       io.emit('commission_assigned', { contractId: req.params.contractId, message: 'Comisión actualizada' })
       res.status(200).json({ success: true, message: 'Comisión actualizada', data: result })
     } catch (error) { next(error) }
   })
 
-  // Quitar a un vendedor de un contrato (solo admin, solo si no tiene pagos registrados)
-  router.delete('/contract/:contractId/sellers/:sellerId', authenticate, authorize('admin'), async (req, res, next) => {
+  // Quitar a un vendedor de un contrato. Con contraseña de admin (requirePassword)
+  // se permite incluso si ya tiene pagos de comisión registrados (context.override).
+  router.delete('/contract/:contractId/sellers/:sellerId', authenticate, authorize('admin'), requirePassword, async (req, res, next) => {
     try {
-      const result = await commissions.removeSeller(req.params.contractId, req.params.sellerId)
+      const result = await commissions.removeSeller(req.params.contractId, req.params.sellerId, req.audit)
       io.emit('commission_assigned', { contractId: req.params.contractId, message: 'Vendedor quitado del contrato' })
       res.status(200).json({ success: true, message: 'Vendedor quitado del contrato', data: result })
     } catch (error) { next(error) }
@@ -57,7 +59,7 @@ const commissionsRouter = (io) => {
       const result = await commissions.registerPayment(req.params.contractId, req.params.sellerId, {
         ...req.body,
         registeredBy: req.user?.name || req.user?.email
-      })
+      }, req.audit)
       io.emit('commission_payment_registered', { contractId: req.params.contractId, sellerId: req.params.sellerId, message: 'Pago de comisión registrado' })
       res.status(200).json({ success: true, message: 'Pago de comisión registrado', data: result })
     } catch (error) { next(error) }
@@ -83,7 +85,7 @@ const commissionsRouter = (io) => {
         }
 
         try {
-          const result = await commissions.addVoucherToMovement(contractId, sellerId, movementId, req.files)
+          const result = await commissions.addVoucherToMovement(contractId, sellerId, movementId, req.files, req.audit)
           io.emit('commission_voucher_added', { contractId, sellerId, message: 'Comprobante de comisión agregado' })
           res.status(200).json({
             success: true,
@@ -103,7 +105,7 @@ const commissionsRouter = (io) => {
   router.delete('/contract/:contractId/sellers/:sellerId/payments/:movementId/vouchers/:fileName', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
       const { contractId, sellerId, movementId, fileName } = req.params
-      const result = await commissions.removeVoucherFromMovement(contractId, sellerId, movementId, fileName)
+      const result = await commissions.removeVoucherFromMovement(contractId, sellerId, movementId, fileName, req.audit)
       res.status(200).json({ success: true, message: 'Comprobante eliminado', data: result })
     } catch (error) { next(error) }
   })
@@ -112,17 +114,17 @@ const commissionsRouter = (io) => {
   router.patch('/contract/:contractId/sellers/:sellerId/payments/:movementId', authenticate, authorize('admin'), async (req, res, next) => {
     try {
       const { contractId, sellerId, movementId } = req.params
-      const result = await commissions.updateMovement(contractId, sellerId, movementId, req.body, req.user)
+      const result = await commissions.updateMovement(contractId, sellerId, movementId, req.body, req.audit)
       io.emit('commission_payment_registered', { contractId, sellerId, message: 'Pago de comisión actualizado' })
       res.status(200).json({ success: true, message: 'Pago de comisión actualizado', data: result })
     } catch (error) { next(error) }
   })
 
-  // Eliminar un pago de comisión ya registrado (solo admin)
-  router.delete('/contract/:contractId/sellers/:sellerId/payments/:movementId', authenticate, authorize('admin'), async (req, res, next) => {
+  // Eliminar un pago de comisión ya registrado (solo admin, exige contraseña)
+  router.delete('/contract/:contractId/sellers/:sellerId/payments/:movementId', authenticate, authorize('admin'), requirePassword, async (req, res, next) => {
     try {
       const { contractId, sellerId, movementId } = req.params
-      const result = await commissions.removeMovement(contractId, sellerId, movementId, req.user)
+      const result = await commissions.removeMovement(contractId, sellerId, movementId, req.audit)
       io.emit('commission_payment_registered', { contractId, sellerId, message: 'Pago de comisión eliminado' })
       res.status(200).json({ success: true, message: 'Pago de comisión eliminado', data: result })
     } catch (error) { next(error) }

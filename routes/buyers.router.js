@@ -24,7 +24,7 @@ const buyersRouter = (io) => {
 
   router.post('/', authenticate, authorize('admin', 'gerente', 'vendedor'), async (req, res, next) => {
     try {
-      const result = await buyers.create(req.body)
+      const result = await buyers.create(req.body, req.audit)
       io.emit('buyer_created', { message: 'Nuevo comprador registrado' })
       res.status(201).json({ success: true, message: 'Comprador creado', data: result })
     } catch (error) { next(error) }
@@ -32,14 +32,14 @@ const buyersRouter = (io) => {
 
   router.patch('/:id', authenticate, authorize('admin', 'gerente', 'vendedor'), async (req, res, next) => {
     try {
-      const result = await buyers.updateOneById(req.params.id, req.body)
+      const result = await buyers.updateOneById(req.params.id, req.body, req.audit)
       res.status(200).json({ success: true, message: 'Comprador actualizado', data: result })
     } catch (error) { next(error) }
   })
 
   router.delete('/:id', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
-      const result = await buyers.deleteOneById(req.params.id)
+      const result = await buyers.deleteOneById(req.params.id, req.audit)
       res.status(200).json({ success: true, message: 'Comprador eliminado', data: result })
     } catch (error) { next(error) }
   })

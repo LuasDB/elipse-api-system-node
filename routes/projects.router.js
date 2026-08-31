@@ -46,7 +46,7 @@ const projectsRouter = (io) => {
   // Crear proyecto
   router.post('/', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
-      const result = await projects.create(req.body)
+      const result = await projects.create(req.body, req.audit)
 
       io.emit('project_created', { message: 'Se creó un nuevo proyecto', data: result })
 
@@ -64,7 +64,7 @@ const projectsRouter = (io) => {
   router.patch('/:id', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
       const { id } = req.params
-      const result = await projects.updateOneById(id, req.body)
+      const result = await projects.updateOneById(id, req.body, req.audit)
 
       io.emit('project_updated', { message: 'Se actualizó un proyecto' })
 
@@ -82,7 +82,7 @@ const projectsRouter = (io) => {
   router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {
     try {
       const { id } = req.params
-      const result = await projects.deleteOneById(id)
+      const result = await projects.deleteOneById(id, req.audit)
 
       io.emit('project_deleted', { message: 'Se eliminó un proyecto' })
 
