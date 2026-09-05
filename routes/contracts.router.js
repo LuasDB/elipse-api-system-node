@@ -16,7 +16,8 @@ const contractsRouter = (io) => {
         status: req.query.status,
         buyerId: req.query.buyerId,
         sellerId: req.query.sellerId,
-        search: req.query.search
+        search: req.query.search,
+        includeCancelled: req.query.includeCancelled === 'true'
       }
       if (req.user.role === 'vendedor') {
         filters.sellerId = req.user._id
@@ -52,13 +53,24 @@ const contractsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
-  // Baja total con cascada (pagos, comisiones, archivos) + liberación de la unidad.
-  // `requirePassword` exige la contraseña del admin (header X-Confirm-Password).
-  router.delete('/:id', authenticate, authorize('admin'), requirePassword, async (req, res, next) => {
+  // Cambia la unidad de un contrato: libera la unidad anterior y reserva la nueva.
+  router.patch('/:id/unit', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
     try {
-      const result = await contracts.hardDeleteContract(req.params.id, req.audit)
-      io.emit('contract_deleted', { message: 'Contrato eliminado', data: result })
-      res.status(200).json({ success: true, message: 'Contrato y datos asociados eliminados', data: result })
+      const result = await contracts.changeUnit(req.params.id, req.body.unitId, req.audit)
+      io.emit('contract_updated', { message: 'Contrato actualizado' })
+      io.emit('unit_updated', { message: 'Se actualizó una unidad' })
+      res.status(200).json({ success: true, message: 'Unidad del contrato actualizada', data: result })
+    } catch (error) { next(error) }
+  })
+
+  // Cancela un contrato (no lo elimina): libera la unidad y conserva pagos/comisiones
+  // como histórico. `requirePassword` exige la contraseña del admin (header X-Confirm-Password).
+  router.post('/:id/cancel', authenticate, authorize('admin'), requirePassword, async (req, res, next) => {
+    try {
+      const result = await contracts.cancelContract(req.params.id, req.body.reason, req.audit)
+      io.emit('contract_updated', { message: 'Contrato cancelado', data: result })
+      io.emit('unit_updated', { message: 'Se actualizó una unidad' })
+      res.status(200).json({ success: true, message: 'Contrato cancelado', data: result })
     } catch (error) { next(error) }
   })
 

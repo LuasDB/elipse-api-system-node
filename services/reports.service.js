@@ -31,6 +31,20 @@ class Reports {
         ]).toArray(),
         db.collection('payments').aggregate([
           { $match: { movements: { $exists: true, $ne: [] } } },
+          // Excluye pagos de contratos cancelados: no cuentan como cobrado.
+          {
+            $lookup: {
+              from: 'contracts',
+              let: { cid: '$contractId' },
+              pipeline: [
+                { $match: { $expr: { $eq: [{ $toString: '$_id' }, '$$cid'] } } },
+                { $project: { status: 1 } }
+              ],
+              as: 'contract'
+            }
+          },
+          { $unwind: { path: '$contract', preserveNullAndEmptyArrays: true } },
+          { $match: { 'contract.status': { $ne: 'cancelado' } } },
           { $unwind: '$movements' },
           { $match: { 'movements.exchangeRateDate': { $gte: start, $lte: queryEnd } } },
           { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$movements.exchangeRateDate' } }, total: { $sum: '$movements.amount' } } }

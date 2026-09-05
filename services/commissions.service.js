@@ -12,6 +12,19 @@ class Commissions {
     this.auditLog = new AuditLog()
   }
 
+  // Un contrato cancelado queda congelado: su comisión no se puede quitar,
+  // recibir pagos, editarlos, eliminarlos, ni recibir nuevos comprobantes.
+  async _assertContractNotCancelled(contractId) {
+    if (!contractId || !ObjectId.isValid(contractId)) return
+    const contract = await db.collection('contracts').findOne(
+      { _id: new ObjectId(contractId) },
+      { projection: { status: 1 } }
+    )
+    if (contract?.status === 'cancelado') {
+      throw Boom.badRequest('El contrato está cancelado, no se puede modificar su comisión')
+    }
+  }
+
   validateAmountAndDescription({ amount, description } = {}) {
     const value = Number(amount)
     if (isNaN(value) || value <= 0) {
@@ -158,6 +171,7 @@ class Commissions {
     try {
       const existing = await db.collection(this.collection).findOne({ contractId, sellerId })
       if (!existing) throw Boom.notFound('No hay comisión asignada a este vendedor en este contrato')
+      await this._assertContractNotCancelled(contractId)
 
       if (!context?.override && (existing.paidAmount || 0) > 0) {
         throw Boom.forbidden('No se puede quitar a este vendedor: ya tiene pagos de comisión registrados')
@@ -199,6 +213,7 @@ class Commissions {
     try {
       const commission = await db.collection(this.collection).findOne({ contractId, sellerId })
       if (!commission) throw Boom.notFound('No hay comisión asignada para este vendedor en este contrato')
+      await this._assertContractNotCancelled(contractId)
 
       const value = Number(amount)
       if (!value || value <= 0) throw Boom.badData('El monto debe ser mayor a 0')
@@ -272,6 +287,7 @@ class Commissions {
 
       const commission = await db.collection(this.collection).findOne({ contractId, sellerId })
       if (!commission) throw Boom.notFound('No hay comisión asignada para este vendedor en este contrato')
+      await this._assertContractNotCancelled(contractId)
 
       const movement = (commission.movements || []).find(m => String(m._id) === String(movementId))
       if (!movement) throw Boom.notFound('Movimiento de pago de comisión no encontrado')
@@ -334,6 +350,7 @@ class Commissions {
 
       const commission = await db.collection(this.collection).findOne({ contractId, sellerId })
       if (!commission) throw Boom.notFound('No hay comisión asignada para este vendedor en este contrato')
+      await this._assertContractNotCancelled(contractId)
 
       const movement = (commission.movements || []).find(m => String(m._id) === String(movementId))
       if (!movement) throw Boom.notFound('Movimiento de pago de comisión no encontrado')
@@ -385,6 +402,7 @@ class Commissions {
 
       const commission = await db.collection(this.collection).findOne({ contractId, sellerId, 'movements._id': new ObjectId(movementId) })
       if (!commission) throw Boom.notFound('Movimiento de pago de comisión no encontrado')
+      await this._assertContractNotCancelled(contractId)
 
       const vouchers = files.map(file => ({
         originalName: file.originalname,
@@ -424,6 +442,7 @@ class Commissions {
       if (!ObjectId.isValid(movementId)) throw Boom.badRequest('ID de movimiento no válido')
 
       const commission = await db.collection(this.collection).findOne({ contractId, sellerId })
+      await this._assertContractNotCancelled(contractId)
 
       await db.collection(this.collection).updateOne(
         { contractId, sellerId, 'movements._id': new ObjectId(movementId) },
@@ -468,10 +487,32 @@ class Commissions {
     }
   }
 
+  // Pipeline compartido: adjunta el status del contrato para poder excluir
+  // las comisiones de contratos cancelados de los totales (no cuentan en
+  // los resúmenes de vendedores ni en el dashboard).
+  _excludeCancelledContractsStages() {
+    return [
+      {
+        $lookup: {
+          from: 'contracts',
+          let: { cid: '$contractId' },
+          pipeline: [
+            { $match: { $expr: { $eq: [{ $toString: '$_id' }, '$$cid'] } } },
+            { $project: { status: 1 } }
+          ],
+          as: 'contract'
+        }
+      },
+      { $unwind: { path: '$contract', preserveNullAndEmptyArrays: true } },
+      { $match: { 'contract.status': { $ne: 'cancelado' } } }
+    ]
+  }
+
   async getSellerSummary(sellerId) {
     try {
       const result = await db.collection(this.collection).aggregate([
         { $match: { sellerId } },
+        ...this._excludeCancelledContractsStages(),
         {
           $group: {
             _id: null,
@@ -494,6 +535,7 @@ class Commissions {
   async getTotalSummary() {
     try {
       const result = await db.collection(this.collection).aggregate([
+        ...this._excludeCancelledContractsStages(),
         {
           $group: {
             _id: null,

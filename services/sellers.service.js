@@ -82,7 +82,7 @@ class Sellers {
 
   async _getContractStats(sellerId) {
     const result = await db.collection('contracts').aggregate([
-      { $match: { sellerId } },
+      { $match: { sellerId, status: { $ne: 'cancelado' } } },
       {
         $group: {
           _id: null,

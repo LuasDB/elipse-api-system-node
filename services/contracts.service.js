@@ -1,5 +1,4 @@
 import { ObjectId } from 'mongodb'
-import { promises as fsp } from 'fs'
 import { db, client } from './../db/mongoClient.js'
 import Boom from '@hapi/boom'
 import AuditLog from './auditLog.service.js'
@@ -160,7 +159,13 @@ class Contracts {
     try {
       const query = {}
       if (filters.projectId) query.projectId = filters.projectId
-      if (filters.status) query.status = filters.status
+      if (filters.status) {
+        query.status = filters.status
+      } else if (!filters.includeCancelled) {
+        // Los contratos cancelados no aparecen en listados generales: solo se
+        // ven si se filtra explícitamente por status=cancelado o se pide includeCancelled.
+        query.status = { $ne: 'cancelado' }
+      }
       if (filters.buyerId) query.buyerId = filters.buyerId
       if (filters.sellerId) query.sellerId = filters.sellerId
       if (filters.search) {
@@ -254,8 +259,18 @@ class Contracts {
       const existing = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
       if (!existing) throw Boom.notFound('Contrato no encontrado')
 
+      if (existing.status === 'cancelado') {
+        throw Boom.badRequest('El contrato está cancelado y no se puede editar')
+      }
+
       const { _id, buyer, unit, project, seller, projectName, ...dataToUpdate } = newData
       dataToUpdate.updatedAt = new Date()
+
+      // Cancelar (o "descancelar") un contrato solo se hace por el endpoint dedicado
+      // (contraseña + motivo obligatorios), nunca por la edición genérica.
+      if (dataToUpdate.status === 'cancelado') {
+        throw Boom.badRequest('Para cancelar un contrato usa la acción "Cancelar contrato"')
+      }
 
       // Convertir numéricos
       const numericFields = ['salePrice', 'downPayment', 'monthlyPayment', 'totalPayments', 'exchangeRate']
@@ -341,42 +356,130 @@ class Contracts {
     }
   }
 
-  // Baja total del contrato con cascada: borra pagos (incluidos los cobrados) y
-  // comisiones + sus pagos, libera la unidad (vuelve a 'disponible') y elimina los
-  // archivos en disco. Todo lo borrado queda con snapshot en la bitácora.
+  // Cambia la unidad de un contrato existente: libera la unidad anterior (vuelve
+  // a 'disponible') y reserva la nueva con el estado que le corresponda según el
+  // estatus actual del contrato. Todo en una transacción — o se mueven las dos
+  // unidades y el contrato, o no se toca nada.
+  async changeUnit(id, newUnitId, context) {
+    try {
+      if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de contrato no válido')
+      if (!ObjectId.isValid(newUnitId)) throw Boom.badData('Unidad no válida')
+
+      const contract = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+      if (!contract) throw Boom.notFound('Contrato no encontrado')
+      if (contract.status === 'cancelado') {
+        throw Boom.badRequest('El contrato está cancelado y no se puede editar')
+      }
+
+      const oldUnitId = contract.unitId
+      if (!oldUnitId || !ObjectId.isValid(oldUnitId)) {
+        throw Boom.badImplementation('El contrato no tiene una unidad válida asignada')
+      }
+      if (String(oldUnitId) === String(newUnitId)) {
+        throw Boom.badRequest('La unidad seleccionada es la misma que ya tiene el contrato')
+      }
+
+      const newUnit = await db.collection('units').findOne({ _id: new ObjectId(newUnitId) })
+      if (!newUnit) throw Boom.notFound('La nueva unidad no existe')
+      if (newUnit.status !== 'disponible') {
+        throw Boom.conflict(`La unidad "${newUnit.identifier}" no está disponible (estado actual: ${newUnit.status}). No se puede asignar al contrato.`)
+      }
+
+      const oldUnit = await db.collection('units').findOne({ _id: new ObjectId(oldUnitId) })
+      const newUnitStatus = this.getUnitStatusFromContract(contract.status) || 'apartada'
+
+      const session = client.startSession()
+      try {
+        await session.withTransaction(async () => {
+          await db.collection('units').updateOne(
+            { _id: new ObjectId(oldUnitId) },
+            { $set: { status: 'disponible', buyerId: null, updatedAt: new Date() } },
+            { session }
+          )
+          await db.collection('units').updateOne(
+            { _id: new ObjectId(newUnitId) },
+            { $set: { status: newUnitStatus, buyerId: contract.buyerId || null, updatedAt: new Date() } },
+            { session }
+          )
+          await db.collection(this.collection).updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { unitId: String(newUnitId), unitIdentifier: newUnit.identifier, updatedAt: new Date() } },
+            { session }
+          )
+        })
+      } finally {
+        await session.endSession()
+      }
+
+      await this.auditLog.record({
+        entity: 'contract',
+        entityId: id,
+        entityLabel: contract.contractNumber,
+        action: 'unit_changed',
+        actor: context?.actor,
+        changes: [
+          { field: 'unitId', from: String(oldUnitId), to: String(newUnitId) },
+          { field: 'unitIdentifier', from: contract.unitIdentifier || oldUnit?.identifier || null, to: newUnit.identifier }
+        ],
+        meta: {
+          ip: context?.ip || null,
+          oldUnit: { id: String(oldUnitId), identifier: oldUnit?.identifier || contract.unitIdentifier || null, releasedTo: 'disponible' },
+          newUnit: { id: String(newUnitId), identifier: newUnit.identifier, setTo: newUnitStatus }
+        }
+      })
+
+      return await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+    } catch (error) {
+      if (Boom.isBoom(error)) throw error
+      throw Boom.badImplementation('Error al cambiar la unidad del contrato', error)
+    }
+  }
+
+  // Cancela un contrato: NO se borra nada (pagos y comisiones se conservan tal
+  // cual, como histórico consultable en el detalle). Libera la unidad (vuelve
+  // a 'disponible') y marca el contrato como 'cancelado' con motivo y quién lo hizo.
+  // A partir de aquí el contrato queda congelado (updateOneById/changeUnit lo rechazan)
+  // y se excluye de los cálculos de dashboard/reportes y de los listados generales.
   //
   // Es una acción sensible: la ruta la protege con `requirePassword`, que además
   // deja `context.confirmedWithPassword = true`.
-  async hardDeleteContract(id, context) {
+  async cancelContract(id, reason, context) {
     try {
       if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID del contrato no es válido')
+      if (!reason || !reason.trim()) throw Boom.badData('El motivo de cancelación es requerido')
 
       const contract = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
       if (!contract) throw Boom.notFound(`No se encontró el contrato con ID ${id}`)
+      if (contract.status === 'cancelado') throw Boom.badRequest('El contrato ya está cancelado')
 
       const unitId = contract.unitId && ObjectId.isValid(contract.unitId)
         ? new ObjectId(contract.unitId)
         : null
 
-      let payments = []
-      let commissions = []
+      const cancelledAt = new Date()
+      const cancelledBy = context?.actor?.name || context?.actor?.email || null
       let unitReleased = false
 
-      // Transacción: o se borra todo y se libera la unidad, o no se toca nada.
-      // Las lecturas van dentro para que el snapshot sea exactamente lo borrado.
       const session = client.startSession()
       try {
         await session.withTransaction(async () => {
-          payments = await db.collection('payments').find({ contractId: id }, { session }).toArray()
-          commissions = await db.collection('commissions').find({ contractId: id }, { session }).toArray()
-
-          await db.collection('payments').deleteMany({ contractId: id }, { session })
-          await db.collection('commissions').deleteMany({ contractId: id }, { session })
-          await db.collection(this.collection).deleteOne({ _id: new ObjectId(id) }, { session })
+          await db.collection(this.collection).updateOne(
+            { _id: new ObjectId(id) },
+            {
+              $set: {
+                status: 'cancelado',
+                cancelReason: reason.trim(),
+                cancelledAt,
+                cancelledBy,
+                updatedAt: cancelledAt
+              }
+            },
+            { session }
+          )
           if (unitId) {
             const r = await db.collection('units').updateOne(
               { _id: unitId },
-              { $set: { status: 'disponible', buyerId: null, updatedAt: new Date() } },
+              { $set: { status: 'disponible', buyerId: null, updatedAt: cancelledAt } },
               { session }
             )
             unitReleased = r.matchedCount > 0
@@ -386,78 +489,22 @@ class Contracts {
         await session.endSession()
       }
 
-      // A partir de aquí ya está confirmado en BD. La bitácora nunca debe tumbar
-      // la operación (auditLog.record swallowea sus propios errores).
       const confirmedWithPassword = context?.confirmedWithPassword || false
 
-      // 1) Registro maestro con el snapshot completo de lo eliminado.
       await this.auditLog.record({
         entity: 'contract',
         entityId: id,
         entityLabel: contract.contractNumber,
-        action: 'contract_hard_deleted',
+        action: 'cancelled',
         actor: context?.actor,
-        snapshot: { contract, payments, commissions },
-        meta: {
-          ip: context?.ip || null,
-          confirmedWithPassword,
-          unitReleased,
-          cascade: { payments: payments.length, commissions: commissions.length }
-        }
+        changes: [{ field: 'status', from: contract.status, to: 'cancelado' }],
+        meta: { ip: context?.ip || null, reason: reason.trim(), confirmedWithPassword, unitReleased }
       })
 
-      // 2) Un registro por entidad borrada, para que su historial propio
-      //    (GET /audit/payment/:id, GET /audit/commission/:id) muestre la baja.
-      for (const p of payments) {
-        await this.auditLog.record({
-          entity: 'payment',
-          entityId: p._id,
-          entityLabel: [p.concept, p.unitIdentifier].filter(Boolean).join(' · '),
-          action: 'deleted',
-          actor: context?.actor,
-          snapshot: p,
-          meta: { ip: context?.ip || null, contractId: id, reason: 'contract_hard_deleted', confirmedWithPassword }
-        })
-      }
-      for (const c of commissions) {
-        await this.auditLog.record({
-          entity: 'commission',
-          entityId: c._id,
-          entityLabel: [c.contractNumber, c.sellerName].filter(Boolean).join(' · '),
-          action: 'deleted',
-          actor: context?.actor,
-          snapshot: c,
-          meta: { ip: context?.ip || null, contractId: id, reason: 'contract_hard_deleted', confirmedWithPassword }
-        })
-      }
-
-      // 3) Limpieza de archivos en disco (no fatal).
-      await this.cleanupContractFilesFromDisk(id, payments)
-
-      return {
-        deleted: { contract: 1, payments: payments.length, commissions: commissions.length },
-        unitReleased
-      }
+      return await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
     } catch (error) {
       if (Boom.isBoom(error)) throw error
-      throw Boom.badImplementation('Error al eliminar el contrato', error)
-    }
-  }
-
-  // Borra los directorios de adjuntos asociados al contrato. Nunca lanza:
-  // un archivo que no se pudo borrar no debe revertir la baja ya confirmada.
-  async cleanupContractFilesFromDisk(contractId, payments = []) {
-    const dirs = [
-      `uploads/contracts/${contractId}`,
-      `uploads/commissions/${contractId}`, // multer anida por /<sellerId> debajo
-      ...payments.map((p) => `uploads/payments/${p._id}`)
-    ]
-    for (const dir of dirs) {
-      try {
-        await fsp.rm(dir, { recursive: true, force: true })
-      } catch (err) {
-        console.error(`No se pudo eliminar el directorio ${dir}:`, err.message)
-      }
+      throw Boom.badImplementation('Error al cancelar el contrato', error)
     }
   }
 
@@ -467,6 +514,7 @@ class Contracts {
 
     const contract = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
     if (!contract) throw Boom.notFound(`No se encontró el contrato con ID ${id}`)
+    if (contract.status === 'cancelado') throw Boom.badRequest('El contrato está cancelado y no se puede editar')
 
     const fileRecords = files.map(file => ({
       originalName: file.originalname,
@@ -506,6 +554,8 @@ async removeFile(id, fileName, context) {
     if (!ObjectId.isValid(id)) throw Boom.badRequest('El ID del contrato no es válido')
 
     const contract = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+    if (!contract) throw Boom.notFound(`No se encontró el contrato con ID ${id}`)
+    if (contract.status === 'cancelado') throw Boom.badRequest('El contrato está cancelado y no se puede editar')
 
     const result = await db.collection(this.collection).updateOne(
       { _id: new ObjectId(id) },

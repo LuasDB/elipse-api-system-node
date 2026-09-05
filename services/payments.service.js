@@ -16,6 +16,19 @@ class Payments {
     this.auditLog = new AuditLog()
   }
 
+  // Un contrato cancelado queda congelado: nada de sus pagos se puede registrar,
+  // editar, revertir, eliminar, ni recibir nuevos comprobantes.
+  async _assertContractNotCancelled(contractId) {
+    if (!contractId || !ObjectId.isValid(contractId)) return
+    const contract = await db.collection('contracts').findOne(
+      { _id: new ObjectId(contractId) },
+      { projection: { status: 1 } }
+    )
+    if (contract?.status === 'cancelado') {
+      throw Boom.badRequest('El contrato está cancelado, no se pueden modificar sus pagos')
+    }
+  }
+
   // Genera calendario completo de pagos al crear contrato
   async generateSchedule(contractId, context) {
     try {
@@ -277,7 +290,7 @@ class Payments {
       if (!payment) throw Boom.notFound('Pago no encontrado')
       if (payment.status === 'pagado') throw Boom.conflict('Este pago ya fue registrado como pagado')
 
-     
+      await this._assertContractNotCancelled(payment.contractId)
 
       const amount = Number(paymentData.amount)
       if (!amount || amount <= 0) throw Boom.badData('El monto debe ser mayor a 0')
@@ -370,6 +383,7 @@ class Payments {
 
       const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
       if (!payment) throw Boom.notFound('Pago no encontrado')
+      await this._assertContractNotCancelled(payment.contractId)
 
       const dataToUpdate = {}
       const changes = []
@@ -437,6 +451,7 @@ class Payments {
 
       const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
       if (!payment) throw Boom.notFound('Pago no encontrado')
+      await this._assertContractNotCancelled(payment.contractId)
 
       const removedMovements = payment.movements || []
       if ((payment.paidAmount || 0) === 0 && removedMovements.length === 0 && payment.status === 'pendiente') {
@@ -579,12 +594,14 @@ class Payments {
             let: { cid: '$contractId' },
             pipeline: [
               { $match: { $expr: { $eq: [{ $toString: '$_id' }, '$$cid'] } } },
-              { $project: { buyerId: 1, contractNumber: 1, projectId: 1 } }
+              { $project: { buyerId: 1, contractNumber: 1, projectId: 1, status: 1 } }
             ],
             as: 'contract'
           }
         },
         { $unwind: { path: '$contract', preserveNullAndEmptyArrays: true } },
+        // Un contrato cancelado no debe seguir generando alertas de cobranza.
+        { $match: { 'contract.status': { $ne: 'cancelado' } } },
         {
           $lookup: {
             from: 'buyers',
@@ -635,9 +652,22 @@ class Payments {
         db.collection(this.collection).aggregate(
           buildAlertPipeline({ status: { $in: ['pendiente', 'parcial'] }, dueDate: { $gte: startOfMonth, $lte: endOfMonth } })
         ).toArray(),
-        // Cobrado este mes
+        // Cobrado este mes (excluye pagos de contratos cancelados)
         db.collection(this.collection).aggregate([
           { $match: { paidDate: { $gte: startOfMonth, $lte: endOfMonth }, status: 'pagado' } },
+          {
+            $lookup: {
+              from: 'contracts',
+              let: { cid: '$contractId' },
+              pipeline: [
+                { $match: { $expr: { $eq: [{ $toString: '$_id' }, '$$cid'] } } },
+                { $project: { status: 1 } }
+              ],
+              as: 'contract'
+            }
+          },
+          { $unwind: { path: '$contract', preserveNullAndEmptyArrays: true } },
+          { $match: { 'contract.status': { $ne: 'cancelado' } } },
           { $group: { _id: null, total: { $sum: '$paidAmount' }, count: { $sum: 1 } } }
         ]).toArray(),
         // Próximos 30 días
@@ -781,6 +811,20 @@ class Payments {
       const [result, soldResult] = await Promise.all([
         db.collection(this.collection).aggregate([
           { $match: { movements: { $exists: true, $ne: [] } } },
+          // Excluye pagos de contratos cancelados: no cuentan como cobrado.
+          {
+            $lookup: {
+              from: 'contracts',
+              let: { cid: '$contractId' },
+              pipeline: [
+                { $match: { $expr: { $eq: [{ $toString: '$_id' }, '$$cid'] } } },
+                { $project: { status: 1 } }
+              ],
+              as: 'contract'
+            }
+          },
+          { $unwind: { path: '$contract', preserveNullAndEmptyArrays: true } },
+          { $match: { 'contract.status': { $ne: 'cancelado' } } },
           { $unwind: '$movements' },
           {
             $match: {
@@ -852,6 +896,7 @@ class Payments {
       if (!context?.override && payment.status === 'pagado') {
         throw Boom.conflict('No se puede eliminar un pago ya registrado')
       }
+      await this._assertContractNotCancelled(payment.contractId)
 
       const result = await db.collection(this.collection).deleteOne({ _id: new ObjectId(id) })
 
@@ -904,6 +949,7 @@ class Payments {
 
     const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
     if (!payment) throw Boom.notFound('Pago no encontrado')
+    await this._assertContractNotCancelled(payment.contractId)
 
     const vouchers = files.map(file => ({
       originalName: file.originalname,
@@ -944,6 +990,8 @@ async removeVoucher(id, fileName, context) {
     if (!ObjectId.isValid(id)) throw Boom.badRequest('ID de pago no válido')
 
     const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(id) })
+    if (!payment) throw Boom.notFound('Pago no encontrado')
+    await this._assertContractNotCancelled(payment.contractId)
 
     await db.collection(this.collection).updateOne(
       { _id: new ObjectId(id) },
@@ -982,6 +1030,7 @@ async removeVoucher(id, fileName, context) {
 
       const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
       if (!payment) throw Boom.notFound('Pago no encontrado')
+      await this._assertContractNotCancelled(payment.contractId)
       if (!payment.isMilestone) throw Boom.badRequest('Este pago no es un hito de obra')
       if (payment.milestoneStatus === 'completado') throw Boom.badRequest('El hito ya está marcado como completado')
 
@@ -1034,6 +1083,7 @@ async removeVoucher(id, fileName, context) {
 
       const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
       if (!payment) throw Boom.notFound('Pago no encontrado')
+      await this._assertContractNotCancelled(payment.contractId)
       if (!payment.isMilestone) throw Boom.badRequest('Este pago no es un hito de obra')
       if (payment.milestoneStatus !== 'completado') {
         throw Boom.badRequest('Solo se puede editar la fecha compromiso de hitos completados')
@@ -1078,6 +1128,7 @@ async removeVoucher(id, fileName, context) {
 
       const payment = await db.collection(this.collection).findOne({ _id: new ObjectId(paymentId) })
       if (!payment) throw Boom.notFound('Pago no encontrado')
+      await this._assertContractNotCancelled(payment.contractId)
       if (!payment.isMilestone) throw Boom.badRequest('Este pago no es un hito de obra')
       if (payment.milestoneStatus !== 'completado') {
         throw Boom.badRequest('El hito no está completado')
