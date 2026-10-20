@@ -16,6 +16,20 @@ const reportsRouter = (io) => {
     } catch (error) { next(error) }
   })
 
+  // Excel con todos los contratos registrados
+  router.get('/contracts/export', authenticate, authorize('admin', 'gerente'), async (req, res, next) => {
+    try {
+      const workbook = await reports.exportContractsExcel()
+      const fileName = `contratos-${new Date().toISOString().slice(0, 10)}.xlsx`
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
+
+      await workbook.xlsx.write(res)
+      res.end()
+    } catch (error) { next(error) }
+  })
+
   return router
 }
 
