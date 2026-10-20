@@ -188,6 +188,9 @@ class Payments {
     try {
       if (!ObjectId.isValid(contractId)) throw Boom.badRequest('ID de contrato no válido')
 
+      const contract = await db.collection('contracts').findOne({ _id: new ObjectId(contractId) })
+      if (!contract) throw Boom.notFound('Contrato no encontrado')
+
       // 1. Identificar pagos cobrados (parciales o totales) que se preservan
       const existingPayments = await db.collection(this.collection)
         .find({ contractId: contractId.toString() })
@@ -204,9 +207,6 @@ class Payments {
       }
 
       // 3. Generar el nuevo calendario solo si NO había pagos cobrados aún
-      //    (si ya hay cobros, NO sobrescribimos nada — el calendario queda como está
-      //     menos los no cobrados que ya borramos. El usuario verá inconsistencia visual
-      //     deliberada para forzar revisión manual.)
       if (paidPayments.length === 0) {
         const result = await this.generateSchedule(contractId, context)
         return {
@@ -217,33 +217,134 @@ class Payments {
         }
       }
 
-      if (unpaidIds.length > 0) {
-        await this.auditLog.record({
-          entity: 'contract',
-          entityId: contractId,
-          action: 'schedule_partially_regenerated',
-          actor: context?.actor,
-          meta: {
-            ip: context?.ip || null,
-            preserved: paidPayments.length,
-            removed: unpaidIds.length
-          }
-        })
-      }
+      // Ya hay pagos cobrados: esos documentos no se tocan (no se borran ni se
+      // sobrescriben). Pero el contrato puede haber ganado renglones nuevos desde
+      // la última generación — típicamente hitos agregados a un contrato que ya
+      // tenía el enganche o un hito previo pagado — y esos renglones nunca llegaron
+      // a crearse como documento de `payments`. Por eso hay que agregarlos aquí,
+      // sin duplicar los que ya existen.
+      const added = await this.appendMissingScheduleItems(contract, paidPayments, context)
 
-      // Si hay pagos cobrados, dejamos solo esos en la BD.
-      // El usuario debe completar el resto manualmente si lo necesita.
       return {
         preserved: paidPayments.length,
         removed: unpaidIds.length,
-        generated: 0,
+        generated: added.length,
         fullRegeneration: false,
-        warning: 'Se conservaron pagos con movimientos. No se regeneró el calendario completo para evitar perder histórico.'
+        warning: added.length > 0
+          ? `Se conservaron los pagos cobrados y se agregaron ${added.length} pago(s) nuevo(s) al calendario.`
+          : 'Se conservaron pagos con movimientos. No se detectaron pagos nuevos por agregar al calendario.'
       }
     } catch (error) {
       if (Boom.isBoom(error)) throw error
       throw Boom.badImplementation('Error al regenerar calendario', error)
     }
+  }
+
+  // Identifica de forma estable un renglón del calendario (enganche / mensualidad
+  // N / hito por nombre), para poder saber si ya existe como documento o no.
+  _scheduleItemKey(payment) {
+    if (payment.isMilestone) return `milestone:${payment.milestoneName}`
+    if (payment.concept === 'Enganche') return 'enganche'
+    const match = /^Mensualidad (\d+) de \d+$/.exec(payment.concept || '')
+    return match ? `monthly:${match[1]}` : `concept:${payment.concept}`
+  }
+
+  // Agrega al calendario los renglones (enganche / mensualidades / hitos) que el
+  // contrato define actualmente y que todavía no existen como documento en
+  // `payments` — sin tocar los que ya existen. Se usa al editar un contrato que
+  // ya tiene pagos cobrados y al que se le agregan hitos (o mensualidades) nuevos.
+  async appendMissingScheduleItems(contract, existingPayments, context) {
+    const now = new Date()
+    const modality = contract.modality || 'monthly'
+    const existingKeys = new Set(existingPayments.map(p => this._scheduleItemKey(p)))
+    let paymentNumber = existingPayments.reduce((max, p) => Math.max(max, p.paymentNumber || 0), 0) + 1
+
+    const toInsert = []
+    const pushItem = (key, fields) => {
+      if (existingKeys.has(key)) return
+      toInsert.push({
+        contractId: contract._id.toString(),
+        projectId: contract.projectId,
+        unitId: contract.unitId,
+        buyerId: contract.buyerId,
+        buyerName: contract.buyerName,
+        unitIdentifier: contract.unitIdentifier,
+        paymentNumber: paymentNumber++,
+        paidAmount: 0,
+        balance: fields.expectedAmount,
+        currency: 'USD',
+        contractExchangeRate: contract.exchangeRate || null,
+        paidDate: null,
+        status: 'pendiente',
+        paymentMethod: null,
+        reference: null,
+        notes: null,
+        isMilestone: false,
+        milestoneStatus: null,
+        movements: [],
+        createdAt: now,
+        updatedAt: now,
+        ...fields
+      })
+    }
+
+    if (contract.downPayment && contract.downPayment > 0) {
+      pushItem('enganche', {
+        concept: 'Enganche',
+        expectedAmount: contract.downPayment,
+        dueDate: contract.promiseDate ? new Date(contract.promiseDate) : now
+      })
+    }
+
+    if (modality === 'monthly') {
+      const totalPayments = Number(contract.totalPayments) || 0
+      const monthlyAmount = Number(contract.monthlyPayment) || 0
+      if (totalPayments > 0 && monthlyAmount > 0) {
+        const startDate = contract.signDate ? new Date(contract.signDate) : now
+        for (let i = 0; i < totalPayments; i++) {
+          const dueDate = new Date(startDate)
+          dueDate.setMonth(dueDate.getMonth() + i + 1)
+          pushItem(`monthly:${i + 1}`, {
+            concept: `Mensualidad ${i + 1} de ${totalPayments}`,
+            expectedAmount: monthlyAmount,
+            dueDate
+          })
+        }
+      }
+    }
+
+    if (modality === 'milestones') {
+      for (const m of contract.milestonesTemplate || []) {
+        pushItem(`milestone:${m.name}`, {
+          concept: m.name,
+          expectedAmount: m.amount,
+          dueDate: m.commitmentDate ? new Date(m.commitmentDate) : null,
+          isMilestone: true,
+          milestoneName: m.name,
+          milestoneOrder: m.order,
+          milestoneStatus: 'pendiente',
+          milestoneCompletedAt: null,
+          milestoneCompletedBy: null,
+          milestoneNotes: null,
+          commitmentDate: m.commitmentDate ? new Date(m.commitmentDate) : null
+        })
+      }
+    }
+
+    if (toInsert.length === 0) return []
+
+    await db.collection(this.collection).insertMany(toInsert)
+
+    await this.auditLog.record({
+      entity: 'contract',
+      entityId: contract._id,
+      entityLabel: contract.contractNumber,
+      action: 'schedule_appended',
+      actor: context?.actor,
+      meta: { ip: context?.ip || null, added: toInsert.length, concepts: toInsert.map(p => p.concept) }
+    })
+
+    return toInsert
   }
 
   // Obtener pagos de un contrato
